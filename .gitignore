@@ -1,0 +1,9 @@
+.venv/
+venv/
+.env
+data/
+__pycache__/
+.pytest_cache/
+.ipynb_checkpoints/
+*.sqlite
+*.db
