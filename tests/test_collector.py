@@ -2,6 +2,7 @@ import pytest
 import requests
 
 from lpbacktest import collector
+from lpbacktest.storage import connect, get_checkpoint
 
 
 def word(value):
@@ -106,3 +107,68 @@ def test_gives_up_after_all_retries(monkeypatch, no_waiting):
 
     with pytest.raises(RuntimeError, match="kept failing"):
         collector.call_api({})
+
+
+def raw_log(block, index):
+    return {**RAW_SWAP, "blockNumber": hex(block), "logIndex": hex(index)}
+
+
+def fake_chain(monkeypatch, logs):
+    """Serve (block, index) logs in pages, like Etherscan. Returns the calls made."""
+    calls = []
+
+    def fake_fetch(from_block, to_block):
+        calls.append(from_block)
+        found = [log for log in logs if from_block <= log[0] <= to_block]
+        return [raw_log(*log) for log in found[: collector.PAGE_SIZE]]
+
+    monkeypatch.setattr(collector, "fetch_swap_logs", fake_fetch)
+    return calls
+
+
+def test_block_at_date(monkeypatch, no_waiting):
+    responses = iter([{"status": "1", "result": "14720000"}])
+
+    class Response(FakeResponse):
+        def json(self):
+            return next(responses)
+
+    monkeypatch.setattr(collector.requests, "get", lambda *a, **k: Response(None))
+    assert collector.block_at_date("2022-05-05") == 14720000
+
+
+def test_collects_all_pages_without_losing_a_split_block(monkeypatch, tmp_path):
+    monkeypatch.setattr(collector, "PAGE_SIZE", 3)
+    monkeypatch.setattr(collector, "START_BLOCK", 100)
+    # Block 102 is split between the first and second pages.
+    logs = [(100, 0), (101, 0), (102, 0), (102, 1), (103, 0)]
+    calls = fake_chain(monkeypatch, logs)
+    conn = connect(tmp_path / "test.sqlite")
+
+    collector.collect_swaps(conn, 110)
+
+    assert conn.execute("SELECT COUNT(*) FROM swaps").fetchone()[0] == 5
+    assert calls == [100, 102, 103]
+    assert get_checkpoint(conn, "Swap") == 110
+
+
+def test_resumes_from_checkpoint(monkeypatch, tmp_path):
+    monkeypatch.setattr(collector, "START_BLOCK", 100)
+    calls = fake_chain(monkeypatch, [(100, 0), (105, 0)])
+    conn = connect(tmp_path / "test.sqlite")
+
+    collector.collect_swaps(conn, 102)
+    collector.collect_swaps(conn, 110)
+
+    assert calls == [100, 103]
+    assert conn.execute("SELECT COUNT(*) FROM swaps").fetchone()[0] == 2
+
+
+def test_block_larger_than_a_page_stops(monkeypatch, tmp_path):
+    monkeypatch.setattr(collector, "PAGE_SIZE", 2)
+    monkeypatch.setattr(collector, "START_BLOCK", 100)
+    fake_chain(monkeypatch, [(100, 0), (100, 1), (100, 2)])
+    conn = connect(tmp_path / "test.sqlite")
+
+    with pytest.raises(RuntimeError, match="more events than one page"):
+        collector.collect_swaps(conn, 110)

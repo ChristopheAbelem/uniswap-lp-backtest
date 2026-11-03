@@ -1,12 +1,14 @@
 """Download Uniswap v3 pool events from the Etherscan API V2."""
 
+import argparse
+import calendar
 import os
 import time
 
 import requests
 from dotenv import load_dotenv
 
-from lpbacktest.storage import connect, insert_events
+from lpbacktest.storage import connect, get_checkpoint, insert_events, set_checkpoint
 
 API_URL = "https://api.etherscan.io/v2/api"
 POOL = "0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640"
@@ -38,7 +40,7 @@ def call_api(params):
             problem = str(error)
         else:
             time.sleep(CALL_INTERVAL)
-            if isinstance(data["result"], list):
+            if isinstance(data["result"], list) or data.get("status") == "1":
                 return data["result"]  # an empty list means no events
             problem = str(data["result"])
             if not any(text in problem.lower() for text in TEMPORARY_ERRORS):
@@ -48,6 +50,20 @@ def call_api(params):
             raise RuntimeError(f"Etherscan kept failing: {problem}")
         print(f"Temporary error: {problem}. Waiting {delay} s.")
         time.sleep(delay)
+
+
+def block_at_date(date):
+    """Return the last block before 00:00 UTC of a YYYY-MM-DD date."""
+    timestamp = calendar.timegm(time.strptime(date, "%Y-%m-%d"))
+    result = call_api(
+        {
+            "module": "block",
+            "action": "getblocknobytime",
+            "timestamp": timestamp,
+            "closest": "before",
+        }
+    )
+    return int(result)
 
 
 def fetch_swap_logs(from_block, to_block):
@@ -97,16 +113,50 @@ def decode_swap(log):
     }
 
 
-def main():
-    """Download the first page of swaps and save it."""
-    conn = connect()
-    logs = fetch_swap_logs(START_BLOCK, "latest")
-    rows = [decode_swap(log) for log in logs]
-    added = insert_events(conn, "swaps", rows)
+def collect_swaps(conn, to_block):
+    """Download all swaps up to to_block, resuming from the checkpoint."""
+    checkpoint = get_checkpoint(conn, "Swap")
+    from_block = START_BLOCK if checkpoint is None else checkpoint + 1
+    pages = 0
 
-    print(f"Downloaded: {len(rows)}. New in database: {added}.")
-    print("First swap:", rows[0])
-    print("Last swap:", rows[-1])
+    while from_block <= to_block:
+        logs = fetch_swap_logs(from_block, to_block)
+        rows = [decode_swap(log) for log in logs]
+        insert_events(conn, "swaps", rows)
+        pages += 1
+
+        if len(rows) < PAGE_SIZE:
+            set_checkpoint(conn, "Swap", to_block)
+            break
+
+        # A full page can cut a block in half, so the last block is read again.
+        last_block = rows[-1]["block_number"]
+        if last_block == from_block:
+            raise RuntimeError(f"Block {last_block} has more events than one page")
+        set_checkpoint(conn, "Swap", last_block - 1)
+        from_block = last_block
+
+        if pages % 50 == 0:
+            print(f"Pages: {pages}. Reached block {last_block}.")
+
+    return pages
+
+
+def main():
+    """Download swaps from the pool's start up to a date."""
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--to", required=True, help="end date, YYYY-MM-DD")
+    args = parser.parse_args()
+
+    conn = connect()
+    to_block = block_at_date(args.to)
+    pages = collect_swaps(conn, to_block)
+
+    total, first, last = conn.execute(
+        "SELECT COUNT(*), MIN(block_number), MAX(block_number) FROM swaps"
+    ).fetchone()
+    print(f"Pages this run: {pages}. Target block: {to_block}.")
+    print(f"Swaps in database: {total}. Blocks: {first} to {last}.")
 
 
 if __name__ == "__main__":
