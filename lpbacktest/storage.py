@@ -66,13 +66,20 @@ CREATE TABLE IF NOT EXISTS collects (
     PRIMARY KEY (block_number, log_index)
 );
 
+CREATE TABLE IF NOT EXISTS gas_prices (
+    block_number     INTEGER PRIMARY KEY,
+    block_time       INTEGER NOT NULL,
+    base_fee_wei     INTEGER,  -- NULL before the London upgrade
+    median_price_wei INTEGER   -- NULL when the block has no transactions
+);
+
 CREATE TABLE IF NOT EXISTS checkpoints (
     event      TEXT    PRIMARY KEY,
     last_block INTEGER NOT NULL
 );
 """
 
-EVENT_TABLES = ("swaps", "mints", "burns", "collects")
+EVENT_TABLES = ("swaps", "mints", "burns", "collects", "gas_prices")
 
 
 def connect(db_path=DEFAULT_DB_PATH):

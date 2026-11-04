@@ -172,3 +172,53 @@ def test_block_larger_than_a_page_stops(monkeypatch, tmp_path):
 
     with pytest.raises(RuntimeError, match="more events than one page"):
         collector.collect_swaps(conn, 110)
+
+
+def raw_block(number, prices, base_fee=None):
+    block = {
+        "number": hex(number),
+        "timestamp": hex(1620252901),
+        "transactions": [{"gasPrice": hex(price)} for price in prices],
+    }
+    if base_fee is not None:
+        block["baseFeePerGas"] = hex(base_fee)
+    return block
+
+
+def test_decode_gas_after_london():
+    row = collector.decode_gas(raw_block(13000000, [30, 10, 20], base_fee=9))
+
+    assert row["block_number"] == 13000000
+    assert row["base_fee_wei"] == 9
+    assert row["median_price_wei"] == 20
+
+
+def test_decode_gas_before_london_and_empty_block():
+    assert collector.decode_gas(raw_block(12400000, [5]))["base_fee_wei"] is None
+    assert collector.decode_gas(raw_block(12400000, []))["median_price_wei"] is None
+
+
+def test_call_api_returns_a_block(monkeypatch, no_waiting):
+    block = raw_block(1, [1])
+    fake_results(monkeypatch, [block])
+
+    assert collector.call_api({}) == block
+
+
+def test_collect_gas_resumes_on_the_grid(monkeypatch, tmp_path):
+    monkeypatch.setattr(collector, "START_BLOCK", 100)
+    monkeypatch.setattr(collector, "GAS_GRID_BLOCKS", 10)
+    calls = []
+
+    def fake_block(number):
+        calls.append(number)
+        return raw_block(number, [1])
+
+    monkeypatch.setattr(collector, "fetch_block", fake_block)
+    conn = connect(tmp_path / "test.sqlite")
+
+    collector.collect_gas(conn, 125)
+    collector.collect_gas(conn, 145)
+
+    assert calls == [100, 110, 120, 130, 140]
+    assert conn.execute("SELECT COUNT(*) FROM gas_prices").fetchone()[0] == 5

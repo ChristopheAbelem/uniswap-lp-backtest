@@ -3,6 +3,7 @@
 import argparse
 import calendar
 import os
+import statistics
 import time
 
 import requests
@@ -15,6 +16,7 @@ POOL = "0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640"
 SWAP_TOPIC = "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67"
 START_BLOCK = 12_370_000  # before the pool's first swap (block 12376891)
 PAGE_SIZE = 1000  # free tier limit per request
+GAS_GRID_BLOCKS = 300  # about one hour of blocks
 
 CALL_INTERVAL = 0.4  # seconds, stays under 3 calls/s
 RETRY_DELAYS = (5, 15, 60, 300, 900, 1800, 1800)  # seconds, about 1h25 in total
@@ -40,9 +42,10 @@ def call_api(params):
             problem = str(error)
         else:
             time.sleep(CALL_INTERVAL)
-            if isinstance(data["result"], list) or data.get("status") == "1":
-                return data["result"]  # an empty list means no events
-            problem = str(data["result"])
+            result = data.get("result")
+            if isinstance(result, (list, dict)) or data.get("status") == "1":
+                return result  # an empty list means no events
+            problem = str(result if result is not None else data)
             if not any(text in problem.lower() for text in TEMPORARY_ERRORS):
                 raise RuntimeError(f"Etherscan error: {problem}")
 
@@ -113,6 +116,49 @@ def decode_swap(log):
     }
 
 
+def fetch_block(block_number):
+    """Return a block with its full transactions."""
+    return call_api(
+        {
+            "module": "proxy",
+            "action": "eth_getBlockByNumber",
+            "tag": hex(block_number),
+            "boolean": "true",
+        }
+    )
+
+
+def decode_gas(block):
+    """Convert a raw block to a row of the gas_prices table."""
+    prices = [hex_to_int(tx["gasPrice"]) for tx in block["transactions"]]
+    base_fee = block.get("baseFeePerGas")
+
+    return {
+        "block_number": hex_to_int(block["number"]),
+        "block_time": hex_to_int(block["timestamp"]),
+        "base_fee_wei": hex_to_int(base_fee) if base_fee else None,
+        "median_price_wei": statistics.median_low(prices) if prices else None,
+    }
+
+
+def collect_gas(conn, to_block):
+    """Download one gas sample every GAS_GRID_BLOCKS, resuming from the checkpoint."""
+    checkpoint = get_checkpoint(conn, "Gas")
+    next_block = START_BLOCK if checkpoint is None else checkpoint + GAS_GRID_BLOCKS
+    samples = 0
+
+    for block_number in range(next_block, to_block + 1, GAS_GRID_BLOCKS):
+        row = decode_gas(fetch_block(block_number))
+        insert_events(conn, "gas_prices", [row])
+        set_checkpoint(conn, "Gas", block_number)
+        samples += 1
+
+        if samples % 500 == 0:
+            print(f"Gas samples: {samples}. Reached block {block_number}.")
+
+    return samples
+
+
 def collect_swaps(conn, to_block):
     """Download all swaps up to to_block, resuming from the checkpoint."""
     checkpoint = get_checkpoint(conn, "Swap")
@@ -143,15 +189,25 @@ def collect_swaps(conn, to_block):
 
 
 def main():
-    """Download swaps from the pool's start up to a date."""
+    """Download swaps or gas prices up to a date."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--to", required=True, help="end date, YYYY-MM-DD")
+    parser.add_argument("--gas", action="store_true", help="collect gas prices")
     args = parser.parse_args()
 
     conn = connect()
     to_block = block_at_date(args.to)
-    pages = collect_swaps(conn, to_block)
 
+    if args.gas:
+        samples = collect_gas(conn, to_block)
+        total, first, last = conn.execute(
+            "SELECT COUNT(*), MIN(block_number), MAX(block_number) FROM gas_prices"
+        ).fetchone()
+        print(f"Samples this run: {samples}. Target block: {to_block}.")
+        print(f"Gas samples in database: {total}. Blocks: {first} to {last}.")
+        return
+
+    pages = collect_swaps(conn, to_block)
     total, first, last = conn.execute(
         "SELECT COUNT(*), MIN(block_number), MAX(block_number) FROM swaps"
     ).fetchone()
