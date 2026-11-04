@@ -3,8 +3,12 @@ from math import floor, sqrt
 import pytest
 
 from lpbacktest.engine import (
+    amounts_to_usd,
+    is_in_range,
+    liquidity_for_usd,
     position_amounts,
     sqrt_price_to_usdc_per_eth,
+    swap_fees,
     tick_to_sqrt_price,
     tick_to_usdc_per_eth,
 )
@@ -58,3 +62,48 @@ def test_position_amounts_match_uniswap(sqrt_price, liquidity, expected):
     amount0, amount1 = position_amounts(liquidity, sqrt_price, LOWER, UPPER)
 
     assert (floor(amount0), floor(amount1)) == expected
+
+
+def test_amounts_to_usd():
+    amount0 = 1_000 * 10**6  # 1,000 USDC
+    amount1 = 2 * 10**18  # 2 WETH
+
+    assert amounts_to_usd(amount0, amount1, 3000) == pytest.approx(7000)
+
+
+@pytest.mark.parametrize("price_move", [0.8, 1.0, 1.25])  # below, inside, above
+def test_liquidity_for_usd_gives_the_requested_value(price_move):
+    entry_sqrt = FIRST_SWAP[0] / 2**96
+    sqrt_price = entry_sqrt * sqrt(price_move)
+    lower, upper = entry_sqrt * sqrt(0.9), entry_sqrt * sqrt(1.1)
+
+    liquidity = liquidity_for_usd(100_000, sqrt_price, lower, upper)
+    amount0, amount1 = position_amounts(liquidity, sqrt_price, lower, upper)
+    usdc_per_eth = 10**12 / sqrt_price**2
+
+    assert amounts_to_usd(amount0, amount1, usdc_per_eth) == pytest.approx(100_000)
+
+
+@pytest.mark.parametrize(
+    "tick, expected",
+    [(99, False), (100, True), (150, True), (199, True), (200, False)],
+)
+def test_is_in_range(tick, expected):
+    assert is_in_range(tick, 100, 200) is expected
+
+
+def test_swap_fees_charge_the_token_that_entered_the_pool():
+    usdc_in = swap_fees(1_000 * 10**6, -3 * 10**17, 10, 90)
+    weth_in = swap_fees(-1_000 * 10**6, 3 * 10**17, 10, 90)
+
+    # 0.05% of the input, and the position has 10% of the liquidity.
+    assert usdc_in == pytest.approx((50_000, 0))
+    assert weth_in == pytest.approx((0, 1.5 * 10**13))
+
+
+def test_swap_fees_after_the_protocol_fee():
+    fee0, fee1 = swap_fees(1_000 * 10**6, -3 * 10**17, 10, 90, protocol_share=0.25)
+
+    # 0.0375% of the input goes to LPs, as in the Uniswap fee table.
+    assert fee0 == pytest.approx(37_500)
+    assert fee1 == 0
