@@ -17,7 +17,7 @@ START_BLOCK = 12_370_000  # before the pool's first swap (block 12376891)
 PAGE_SIZE = 1000  # free tier limit per request
 
 CALL_INTERVAL = 0.4  # seconds, stays under 3 calls/s
-RETRY_DELAYS = (5, 15, 60, 300)  # seconds
+RETRY_DELAYS = (5, 15, 60, 300, 900, 1800, 1800)  # seconds, about 1h25 in total
 TEMPORARY_ERRORS = ("invalid api key", "rate limit")
 
 

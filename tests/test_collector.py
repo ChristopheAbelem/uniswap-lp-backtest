@@ -103,7 +103,7 @@ def test_permanent_error_stops_immediately(monkeypatch, no_waiting):
 
 
 def test_gives_up_after_all_retries(monkeypatch, no_waiting):
-    fake_results(monkeypatch, ["Invalid API Key (#err2)"] * 5)
+    fake_results(monkeypatch, ["Invalid API Key (#err2)"] * (len(collector.RETRY_DELAYS) + 1))
 
     with pytest.raises(RuntimeError, match="kept failing"):
         collector.call_api({})
