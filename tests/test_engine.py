@@ -1,3 +1,4 @@
+import math
 from math import floor, sqrt
 
 import pytest
@@ -7,6 +8,8 @@ from lpbacktest.engine import (
     is_in_range,
     liquidity_for_usd,
     position_amounts,
+    range_ticks,
+    simulate_fixed_range,
     sqrt_price_to_usdc_per_eth,
     swap_fees,
     tick_to_sqrt_price,
@@ -107,3 +110,64 @@ def test_swap_fees_after_the_protocol_fee():
     # 0.0375% of the input goes to LPs, as in the Uniswap fee table.
     assert fee0 == pytest.approx(37_500)
     assert fee1 == 0
+
+
+def test_range_ticks_use_the_tick_spacing_and_contain_the_width():
+    lower, upper = range_ticks(194996, 0.10)
+
+    assert lower % 10 == 0 and upper % 10 == 0
+    assert lower <= 194996 + 0.9 and upper >= 194996
+    assert 1.0001 ** (194996 - lower) == pytest.approx(1 / 0.9, rel=1e-2)
+    assert 1.0001 ** (upper - 194996) == pytest.approx(1.1, rel=1e-2)
+
+
+def swap_at(tick, amount0=0, amount1=0, active_liquidity=10**18):
+    sqrt_price_x96 = int(1.0001 ** (tick / 2) * 2**96)
+    return (amount0, amount1, sqrt_price_x96, active_liquidity, tick)
+
+
+def test_flat_price_has_no_impermanent_loss():
+    swaps = [swap_at(195000)] + [swap_at(195000, amount0=10**9)] * 3
+
+    result = simulate_fixed_range(swaps, 100_000, 0.10)
+
+    assert result["swaps"] == 3
+    assert result["swaps_in_range"] == 3
+    assert result["impermanent_loss_usd"] == pytest.approx(0, abs=1e-6)
+    assert result["net_vs_hodl_usd"] == pytest.approx(result["fees_usd"])
+    assert result["fees_usd"] > 0
+
+
+def test_price_exit_stops_fees_and_creates_a_loss():
+    swaps = [swap_at(195000), swap_at(195000, amount0=10**9), swap_at(200000, amount0=10**9)]
+
+    result = simulate_fixed_range(swaps, 100_000, 0.10)
+    only_first = simulate_fixed_range(swaps[:2], 100_000, 0.10)
+
+    assert result["swaps"] == 2
+    assert result["swaps_in_range"] == 1
+    assert result["impermanent_loss_usd"] < 0
+    # Fee tokens are the same, whatever the final price.
+    assert result["fees_usd"] == pytest.approx(only_first["fees_usd"])
+
+
+def test_wide_position_matches_the_v2_impermanent_loss_formula():
+    # A very wide range behaves like v2: IL = 2 * sqrt(r) / (1 + r) - 1.
+    r = 1.21  # raw price ratio
+    sqrt_start, sqrt_end = 10_000.0, 10_000.0 * sqrt(r)
+    lower, upper = sqrt_start / 10**6, sqrt_start * 10**6
+
+    liquidity = 10**18
+    start0, start1 = position_amounts(liquidity, sqrt_start, lower, upper)
+    end0, end1 = position_amounts(liquidity, sqrt_end, lower, upper)
+    price = sqrt_end**2  # value both tokens in token1
+
+    position = end0 * price + end1
+    hodl = start0 * price + start1
+
+    assert position / hodl - 1 == pytest.approx(2 * sqrt(r) / (1 + r) - 1, abs=1e-5)
+
+
+def test_no_swaps_is_an_error():
+    with pytest.raises(ValueError):
+        simulate_fixed_range([], 100_000, 0.10)

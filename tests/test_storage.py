@@ -1,4 +1,10 @@
-from lpbacktest.storage import connect, get_checkpoint, insert_events, set_checkpoint
+from lpbacktest.storage import (
+    connect,
+    get_checkpoint,
+    insert_events,
+    load_swaps,
+    set_checkpoint,
+)
 
 SWAP = {
     "block_number": 12376891,
@@ -38,3 +44,24 @@ def test_checkpoint_updates(tmp_path):
     set_checkpoint(conn, "Swap", 100)
     set_checkpoint(conn, "Swap", 200)
     assert get_checkpoint(conn, "Swap") == 200
+
+
+def test_load_swaps_respects_the_time_range(tmp_path):
+    conn = connect(tmp_path / "test.sqlite")
+    insert_events(
+        conn,
+        "gas_prices",
+        [
+            {"block_number": 100, "block_time": 1000, "base_fee_wei": None, "median_price_wei": 1},
+            {"block_number": 400, "block_time": 4000, "base_fee_wei": None, "median_price_wei": 1},
+        ],
+    )
+    rows = [
+        {**SWAP, "block_number": block, "block_time": block * 10, "tick": block}
+        for block in (150, 200, 300, 500)
+    ]
+    insert_events(conn, "swaps", rows)
+
+    swaps = list(load_swaps(conn, 2000, 5000))
+
+    assert [swap[4] for swap in swaps] == [200, 300]

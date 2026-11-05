@@ -110,6 +110,33 @@ def insert_events(conn, table, rows):
         return conn.total_changes - before
 
 
+def load_swaps(conn, start_time, end_time):
+    """Yield swaps of a time range for the engine, in chain order."""
+    # gas_prices is small, so it finds the first block quickly.
+    row = conn.execute(
+        """
+        SELECT MAX(block_number) FROM gas_prices WHERE block_time <= ?
+        """,
+        (start_time,),
+    ).fetchone()
+    first_block = row[0] or 0
+
+    rows = conn.execute(
+        """
+        SELECT amount0, amount1, sqrt_price_x96, liquidity, tick, block_time
+        FROM swaps
+        WHERE block_number >= ?
+        ORDER BY block_number, log_index
+        """,
+        (first_block,),
+    )
+    for amount0, amount1, sqrt_price_x96, liquidity, tick, block_time in rows:
+        if block_time >= end_time:
+            break
+        if block_time >= start_time:
+            yield amount0, amount1, sqrt_price_x96, liquidity, tick
+
+
 def get_checkpoint(conn, event):
     """Return the last block saved for an event, or None."""
     row = conn.execute(
