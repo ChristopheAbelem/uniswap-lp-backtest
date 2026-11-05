@@ -73,13 +73,32 @@ CREATE TABLE IF NOT EXISTS gas_prices (
     median_price_wei INTEGER   -- NULL when the block has no transactions
 );
 
+CREATE TABLE IF NOT EXISTS fee_protocol_changes (
+    block_number  INTEGER NOT NULL,
+    log_index     INTEGER NOT NULL,
+    tx_hash       TEXT    NOT NULL,
+    block_time    INTEGER NOT NULL,
+    fee0_old      INTEGER NOT NULL,
+    fee1_old      INTEGER NOT NULL,
+    fee0_new      INTEGER NOT NULL,
+    fee1_new      INTEGER NOT NULL,
+    PRIMARY KEY (block_number, log_index)
+);
+
 CREATE TABLE IF NOT EXISTS checkpoints (
     event      TEXT    PRIMARY KEY,
     last_block INTEGER NOT NULL
 );
 """
 
-EVENT_TABLES = ("swaps", "mints", "burns", "collects", "gas_prices")
+EVENT_TABLES = (
+    "swaps",
+    "mints",
+    "burns",
+    "collects",
+    "gas_prices",
+    "fee_protocol_changes",
+)
 
 
 def connect(db_path=DEFAULT_DB_PATH):
@@ -123,18 +142,36 @@ def load_swaps(conn, start_time, end_time):
 
     rows = conn.execute(
         """
-        SELECT amount0, amount1, sqrt_price_x96, liquidity, tick, block_time
+        SELECT amount0, amount1, sqrt_price_x96, liquidity, tick, block_number, block_time
         FROM swaps
         WHERE block_number >= ?
         ORDER BY block_number, log_index
         """,
         (first_block,),
     )
-    for amount0, amount1, sqrt_price_x96, liquidity, tick, block_time in rows:
+    for *swap, block_time in rows:
         if block_time >= end_time:
             break
         if block_time >= start_time:
-            yield amount0, amount1, sqrt_price_x96, liquidity, tick
+            yield swap
+
+
+def load_fee_changes(conn):
+    """Return [(block_number, protocol_share)] of the pool's fee changes."""
+    rows = conn.execute(
+        """
+        SELECT block_number, fee0_new, fee1_new
+        FROM fee_protocol_changes
+        ORDER BY block_number, log_index
+        """
+    ).fetchall()
+
+    changes = []
+    for block_number, fee0, fee1 in rows:
+        if fee0 != fee1:
+            raise ValueError(f"Different protocol fees per token at block {block_number}")
+        changes.append((block_number, 1 / fee0 if fee0 else 0.0))
+    return changes
 
 
 def get_checkpoint(conn, event):

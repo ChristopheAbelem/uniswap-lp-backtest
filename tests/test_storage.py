@@ -2,6 +2,7 @@ from lpbacktest.storage import (
     connect,
     get_checkpoint,
     insert_events,
+    load_fee_changes,
     load_swaps,
     set_checkpoint,
 )
@@ -65,3 +66,20 @@ def test_load_swaps_respects_the_time_range(tmp_path):
     swaps = list(load_swaps(conn, 2000, 5000))
 
     assert [swap[4] for swap in swaps] == [200, 300]
+
+
+def test_load_fee_changes_converts_the_divisor_to_a_share(tmp_path):
+    conn = connect(tmp_path / "test.sqlite")
+    row = {
+        "block_number": 100,
+        "log_index": 1,
+        "tx_hash": "0xabc",
+        "block_time": 1000,
+        "fee0_old": 0,
+        "fee1_old": 0,
+        "fee0_new": 4,
+        "fee1_new": 4,
+    }
+    insert_events(conn, "fee_protocol_changes", [row])
+
+    assert load_fee_changes(conn) == [(100, 0.25)]

@@ -82,12 +82,13 @@ def range_ticks(tick, width):
     return tick_lower, tick_upper
 
 
-def simulate_fixed_range(swaps, usd, width, protocol_share=0.0):
+def simulate_fixed_range(swaps, usd, width, fee_changes=()):
     """Replay swaps for a fixed position, valuing fees at the final price.
 
-    Each swap is (amount0, amount1, sqrt_price_x96, liquidity, tick). The first
-    swap sets the entry price. The event's liquidity and tick are the values
-    after the swap, so swaps that cross ticks are approximated.
+    Each swap is (amount0, amount1, sqrt_price_x96, liquidity, tick, block_number).
+    The first swap sets the entry price. The event's liquidity and tick are the
+    values after the swap, so swaps that cross ticks are approximated. fee_changes
+    is [(block_number, protocol_share)], oldest first.
     """
     swaps = iter(swaps)
     try:
@@ -106,10 +107,14 @@ def simulate_fixed_range(swaps, usd, width, protocol_share=0.0):
 
     fee0 = fee1 = 0.0
     total_swaps = swaps_in_range = 0
+    protocol_share = 0.0
+    pending_changes = list(fee_changes)
 
-    for amount0, amount1, sqrt_price_x96, active_liquidity, tick in swaps:
+    for amount0, amount1, sqrt_price_x96, active_liquidity, tick, block_number in swaps:
         total_swaps += 1
         sqrt_price = int(sqrt_price_x96) / Q96
+        while pending_changes and block_number >= pending_changes[0][0]:
+            protocol_share = pending_changes.pop(0)[1]
         if is_in_range(tick, tick_lower, tick_upper):
             swaps_in_range += 1
             earned0, earned1 = swap_fees(
@@ -131,6 +136,7 @@ def simulate_fixed_range(swaps, usd, width, protocol_share=0.0):
         "tick_upper": tick_upper,
         "swaps": total_swaps,
         "swaps_in_range": swaps_in_range,
+        "final_protocol_share": protocol_share,
         "fees_usd": fees_usd,
         "position_usd": position_usd,
         "hodl_usd": hodl_usd,

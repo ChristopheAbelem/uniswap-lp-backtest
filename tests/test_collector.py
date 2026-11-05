@@ -222,3 +222,41 @@ def test_collect_gas_resumes_on_the_grid(monkeypatch, tmp_path):
 
     assert calls == [100, 110, 120, 130, 140]
     assert conn.execute("SELECT COUNT(*) FROM gas_prices").fetchone()[0] == 5
+
+
+def test_decode_fee_protocol():
+    log = {
+        **RAW_SWAP,
+        "data": "0x" + word(0) + word(0) + word(4) + word(6),
+    }
+
+    row = collector.decode_fee_protocol(log)
+
+    assert (row["fee0_old"], row["fee1_old"]) == (0, 0)
+    assert (row["fee0_new"], row["fee1_new"]) == (4, 6)
+
+
+def test_decode_slot0_fee_protocol():
+    # slot0 words: sqrtPriceX96, tick, 3 observation fields, feeProtocol, unlocked.
+    fee_protocol = 4 + (6 << 4)
+    result = "0x" + word(2**96) + word(-5) + word(1) + word(2) + word(3)
+    result += word(fee_protocol) + word(1)
+
+    assert collector.decode_slot0_fee_protocol(result) == (4, 6)
+
+
+def test_call_api_returns_an_eth_call_result(monkeypatch, no_waiting):
+    fake_results(monkeypatch, ["0x" + word(1)])
+
+    assert collector.call_api({}) == "0x" + word(1)
+
+
+def test_collect_fee_protocol_is_idempotent(monkeypatch, tmp_path):
+    log = {**RAW_SWAP, "data": "0x" + word(0) + word(0) + word(4) + word(4)}
+    monkeypatch.setattr(collector, "fetch_logs", lambda *args: [log])
+    conn = connect(tmp_path / "test.sqlite")
+
+    collector.collect_fee_protocol(conn)
+    collector.collect_fee_protocol(conn)
+
+    assert conn.execute("SELECT COUNT(*) FROM fee_protocol_changes").fetchone()[0] == 1

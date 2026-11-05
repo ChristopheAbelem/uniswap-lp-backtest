@@ -121,9 +121,9 @@ def test_range_ticks_use_the_tick_spacing_and_contain_the_width():
     assert 1.0001 ** (upper - 194996) == pytest.approx(1.1, rel=1e-2)
 
 
-def swap_at(tick, amount0=0, amount1=0, active_liquidity=10**18):
+def swap_at(tick, amount0=0, amount1=0, active_liquidity=10**18, block=1):
     sqrt_price_x96 = int(1.0001 ** (tick / 2) * 2**96)
-    return (amount0, amount1, sqrt_price_x96, active_liquidity, tick)
+    return (amount0, amount1, sqrt_price_x96, active_liquidity, tick, block)
 
 
 def test_flat_price_has_no_impermanent_loss():
@@ -166,6 +166,18 @@ def test_wide_position_matches_the_v2_impermanent_loss_formula():
     hodl = start0 * price + start1
 
     assert position / hodl - 1 == pytest.approx(2 * sqrt(r) / (1 + r) - 1, abs=1e-5)
+
+
+def test_protocol_fee_applies_only_after_its_block():
+    swaps = [swap_at(195000, block=1)]
+    swaps += [swap_at(195000, amount0=10**9, block=block) for block in (5, 10, 15)]
+
+    before = simulate_fixed_range(swaps, 100_000, 0.10)
+    after = simulate_fixed_range(swaps, 100_000, 0.10, fee_changes=[(10, 0.25)])
+
+    # Two of the three swaps pay 75% of the fee.
+    assert after["fees_usd"] == pytest.approx(before["fees_usd"] * (1 + 0.75 * 2) / 3)
+    assert after["final_protocol_share"] == 0.25
 
 
 def test_no_swaps_is_an_error():

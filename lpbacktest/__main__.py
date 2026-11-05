@@ -5,7 +5,7 @@ import calendar
 import time
 
 from lpbacktest.engine import simulate_fixed_range
-from lpbacktest.storage import connect, load_swaps
+from lpbacktest.storage import connect, load_fee_changes, load_swaps
 
 
 def to_timestamp(date):
@@ -15,9 +15,10 @@ def to_timestamp(date):
 def run(args):
     conn = connect()
     swaps = load_swaps(conn, to_timestamp(args.start), to_timestamp(args.end))
+    fee_changes = load_fee_changes(conn)
 
     started = time.perf_counter()
-    result = simulate_fixed_range(swaps, args.usd, args.width, args.protocol_share)
+    result = simulate_fixed_range(swaps, args.usd, args.width, fee_changes)
     elapsed = time.perf_counter() - started
 
     share_in_range = result["swaps_in_range"] / result["swaps"]
@@ -30,7 +31,8 @@ def run(args):
     print(f"HODL value: ${result['hodl_usd']:,.2f}.")
     print(f"Impermanent loss: ${result['impermanent_loss_usd']:,.2f}.")
     print(f"Net vs HODL: ${result['net_vs_hodl_usd']:,.2f}.")
-    print(f"Protocol fee share: {args.protocol_share:.0%}. No gas or rebalancing yet.")
+    print(f"Protocol fee share at the end: {result['final_protocol_share']:.0%}.")
+    print("No gas or rebalancing yet.")
     print(f"Replay time: {elapsed:.1f} s.")
 
 
@@ -43,7 +45,6 @@ def main():
     run_parser.add_argument("--end", required=True, help="end date, YYYY-MM-DD")
     run_parser.add_argument("--width", type=float, default=0.1, help="0.1 means +/-10%%")
     run_parser.add_argument("--usd", type=float, default=100_000)
-    run_parser.add_argument("--protocol-share", type=float, default=0.0)
     run_parser.set_defaults(handler=run)
 
     args = parser.parse_args()

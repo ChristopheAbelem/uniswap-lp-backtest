@@ -14,6 +14,8 @@ from lpbacktest.storage import connect, get_checkpoint, insert_events, set_check
 API_URL = "https://api.etherscan.io/v2/api"
 POOL = "0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640"
 SWAP_TOPIC = "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67"
+SET_FEE_PROTOCOL_TOPIC = "0x973d8d92bb299f4af6ce49b52a8adb85ae46b9f214c4c4fc06ac77401237b133"
+SLOT0_SELECTOR = "0x3850c7bd"
 START_BLOCK = 12_370_000  # before the pool's first swap (block 12376891)
 PAGE_SIZE = 1000  # free tier limit per request
 GAS_GRID_BLOCKS = 300  # about one hour of blocks
@@ -43,7 +45,8 @@ def call_api(params):
         else:
             time.sleep(CALL_INTERVAL)
             result = data.get("result")
-            if isinstance(result, (list, dict)) or data.get("status") == "1":
+            is_hex = isinstance(result, str) and result.startswith("0x")
+            if isinstance(result, (list, dict)) or is_hex or data.get("status") == "1":
                 return result  # an empty list means no events
             problem = str(result if result is not None else data)
             if not any(text in problem.lower() for text in TEMPORARY_ERRORS):
@@ -69,20 +72,25 @@ def block_at_date(date):
     return int(result)
 
 
-def fetch_swap_logs(from_block, to_block):
-    """Return up to PAGE_SIZE raw Swap logs, oldest first."""
+def fetch_logs(topic, from_block, to_block):
+    """Return up to PAGE_SIZE raw logs of one event, oldest first."""
     return call_api(
         {
             "module": "logs",
             "action": "getLogs",
             "address": POOL,
-            "topic0": SWAP_TOPIC,
+            "topic0": topic,
             "fromBlock": from_block,
             "toBlock": to_block,
             "page": 1,
             "offset": PAGE_SIZE,
         }
     )
+
+
+def fetch_swap_logs(from_block, to_block):
+    """Return up to PAGE_SIZE raw Swap logs, oldest first."""
+    return fetch_logs(SWAP_TOPIC, from_block, to_block)
 
 
 def hex_to_int(value):
@@ -114,6 +122,54 @@ def decode_swap(log):
         "liquidity": str(int(words[3], 16)),
         "tick": to_signed(words[4]),
     }
+
+
+def decode_fee_protocol(log):
+    """Convert a raw SetFeeProtocol log to a row of its table."""
+    data = log["data"][2:]
+    words = [int(data[i : i + 64], 16) for i in range(0, len(data), 64)]
+
+    return {
+        "block_number": hex_to_int(log["blockNumber"]),
+        "log_index": hex_to_int(log["logIndex"]),
+        "tx_hash": log["transactionHash"],
+        "block_time": hex_to_int(log["timeStamp"]),
+        "fee0_old": words[0],
+        "fee1_old": words[1],
+        "fee0_new": words[2],
+        "fee1_new": words[3],
+    }
+
+
+def decode_slot0_fee_protocol(result):
+    """Return (fee0, fee1) from an eth_call to slot0()."""
+    data = result[2:]
+    value = int(data[5 * 64 : 6 * 64], 16)
+    return value % 16, value >> 4
+
+
+def fetch_slot0_fee_protocol():
+    """Return the pool's current (fee0, fee1) protocol fee divisors."""
+    result = call_api(
+        {
+            "module": "proxy",
+            "action": "eth_call",
+            "to": POOL,
+            "data": SLOT0_SELECTOR,
+            "tag": "latest",
+        }
+    )
+    return decode_slot0_fee_protocol(result)
+
+
+def collect_fee_protocol(conn):
+    """Download every SetFeeProtocol event. There are too few to need paging."""
+    logs = fetch_logs(SET_FEE_PROTOCOL_TOPIC, START_BLOCK, "latest")
+    if len(logs) >= PAGE_SIZE:
+        raise RuntimeError("More SetFeeProtocol events than one page")
+    rows = [decode_fee_protocol(log) for log in logs]
+    insert_events(conn, "fee_protocol_changes", rows)
+    return rows
 
 
 def fetch_block(block_number):
@@ -189,13 +245,23 @@ def collect_swaps(conn, to_block):
 
 
 def main():
-    """Download swaps or gas prices up to a date."""
+    """Download swaps, gas prices or protocol fee changes."""
     parser = argparse.ArgumentParser()
-    parser.add_argument("--to", required=True, help="end date, YYYY-MM-DD")
+    parser.add_argument("--to", help="end date, YYYY-MM-DD")
     parser.add_argument("--gas", action="store_true", help="collect gas prices")
+    parser.add_argument("--fee-protocol", action="store_true", help="collect fee changes")
     args = parser.parse_args()
 
     conn = connect()
+
+    if args.fee_protocol:
+        for row in collect_fee_protocol(conn):
+            print(row)
+        print("Current slot0 feeProtocol (fee0, fee1):", fetch_slot0_fee_protocol())
+        return
+
+    if args.to is None:
+        parser.error("--to is required")
     to_block = block_at_date(args.to)
 
     if args.gas:
