@@ -9,7 +9,6 @@ from lpbacktest.collector import (
     MINT_TOPIC,
     POSITION_MANAGER,
     fetch_all_logs,
-    fetch_logs,
     fetch_receipt,
     hex_to_int,
     to_signed,
@@ -125,6 +124,8 @@ def real_fees(position, token_id):
 def compare(conn, position, real):
     """Return one result row, with both fee totals in USD at the final price."""
     swaps = load_swaps_by_block(conn, position["mint_block"] + 1, position["burn_block"] - 1)
+    if not swaps:
+        raise ValueError("No swaps during this position")
     simulated = replay_real_position(
         swaps,
         position["liquidity"],

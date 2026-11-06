@@ -1,4 +1,3 @@
-import math
 from itertools import count
 from math import floor, sqrt
 
@@ -144,7 +143,7 @@ def test_flat_price_has_no_impermanent_loss():
 
     assert result["swaps"] == 3
     assert result["swaps_in_range"] == 3
-    assert result["impermanent_loss_usd"] == pytest.approx(0, abs=1e-6)
+    assert result["position_vs_hodl_usd"] == pytest.approx(0, abs=1e-6)
     assert result["net_vs_hodl_usd"] == pytest.approx(result["fees_usd"])
     assert result["fees_usd"] > 0
 
@@ -157,7 +156,7 @@ def test_price_exit_stops_fees_and_creates_a_loss():
 
     assert result["swaps"] == 2
     assert result["swaps_in_range"] == 1
-    assert result["impermanent_loss_usd"] < 0
+    assert result["position_vs_hodl_usd"] < 0
     # Fee tokens are the same, whatever the final price.
     assert result["fees_usd"] == pytest.approx(only_first["fees_usd"])
 

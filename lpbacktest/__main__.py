@@ -30,7 +30,7 @@ def run(args):
     print(f"Fees: ${result['fees_usd']:,.2f}.")
     print(f"Position value: ${result['position_usd']:,.2f}.")
     print(f"HODL value: ${result['hodl_usd']:,.2f}.")
-    print(f"Position vs HODL: ${result['impermanent_loss_usd']:,.2f}.")
+    print(f"Position vs HODL: ${result['position_vs_hodl_usd']:,.2f}.")
     print(f"Net vs HODL: ${result['net_vs_hodl_usd']:,.2f}.")
     thin_fees = result["thin_liquidity_fees_usd"]
     without_thin = result["net_vs_hodl_usd"] - thin_fees

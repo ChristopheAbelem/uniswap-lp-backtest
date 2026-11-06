@@ -269,6 +269,6 @@ def simulate_range(swaps, usd, width, fee_changes=(), gas=None, rebalance=False)
         "fees_usd": fees_usd,
         "position_usd": position_usd,
         "hodl_usd": hodl_usd,
-        "impermanent_loss_usd": position_usd - hodl_usd,
+        "position_vs_hodl_usd": position_usd - hodl_usd,
         "net_vs_hodl_usd": position_usd + fees_usd - hodl_usd,
     }
