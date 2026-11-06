@@ -32,6 +32,9 @@ def run(args):
     print(f"HODL value: ${result['hodl_usd']:,.2f}.")
     print(f"Position vs HODL: ${result['impermanent_loss_usd']:,.2f}.")
     print(f"Net vs HODL: ${result['net_vs_hodl_usd']:,.2f}.")
+    thin_fees = result["thin_liquidity_fees_usd"]
+    without_thin = result["net_vs_hodl_usd"] - thin_fees
+    print(f"Fees above 5% of a swap: ${thin_fees:,.2f}. Net without them: ${without_thin:,.2f}.")
     print(f"Protocol fee share at the end: {result['final_protocol_share']:.0%}.")
     print(f"Rebalances: {result['rebalances']}.")
     print(f"Costs: gas ${result['gas_usd']:,.2f}, swap fees ${result['swap_fee_usd']:,.2f}, price impact ${result['price_impact_usd']:,.2f}.")

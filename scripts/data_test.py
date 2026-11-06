@@ -7,8 +7,8 @@ Checks:
   4. Historical base fee (gas) is available from block headers.
 
 Usage:
-  export ETHERSCAN_API_KEY="your_key"
-  python data_test.py
+  Put ETHERSCAN_API_KEY in .env, then run from the project root:
+  python scripts/data_test.py
 """
 
 import os
