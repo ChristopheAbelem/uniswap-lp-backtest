@@ -183,6 +183,23 @@ def load_fee_changes(conn):
     return changes
 
 
+def load_gas_prices(conn):
+    """Return (blocks, prices in wei), repeating the last price in empty blocks."""
+    rows = conn.execute(
+        "SELECT block_number, median_price_wei FROM gas_prices ORDER BY block_number"
+    ).fetchall()
+
+    blocks, prices = [], []
+    for block_number, price in rows:
+        if price is None:
+            if not prices:
+                continue
+            price = prices[-1]
+        blocks.append(block_number)
+        prices.append(price)
+    return blocks, prices
+
+
 def get_checkpoint(conn, event):
     """Return the last block saved for an event, or None."""
     row = conn.execute(

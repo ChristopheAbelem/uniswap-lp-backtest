@@ -3,6 +3,7 @@ from lpbacktest.storage import (
     get_checkpoint,
     insert_events,
     load_fee_changes,
+    load_gas_prices,
     load_swaps,
     set_checkpoint,
 )
@@ -83,3 +84,15 @@ def test_load_fee_changes_converts_the_divisor_to_a_share(tmp_path):
     insert_events(conn, "fee_protocol_changes", [row])
 
     assert load_fee_changes(conn) == [(100, 0.25)]
+
+
+def test_load_gas_prices_repeats_the_last_price(tmp_path):
+    conn = connect(tmp_path / "test.sqlite")
+    prices = [(100, None), (400, 10), (700, None), (1000, 30)]
+    rows = [
+        {"block_number": b, "block_time": b, "base_fee_wei": None, "median_price_wei": p}
+        for b, p in prices
+    ]
+    insert_events(conn, "gas_prices", rows)
+
+    assert load_gas_prices(conn) == ([400, 700, 1000], [10, 10, 30])

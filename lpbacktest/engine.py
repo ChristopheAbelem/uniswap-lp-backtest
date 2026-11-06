@@ -1,12 +1,21 @@
 """Replay engine for a Uniswap v3 LP position."""
 
+import bisect
 import math
+import statistics
+from collections import deque
 
 USDC_DECIMALS = 6
 WETH_DECIMALS = 18
 DECIMALS_FACTOR = 10 ** (WETH_DECIMALS - USDC_DECIMALS)
 POOL_FEE = 0.0005  # 0.05% fee tier, read on-chain
 TICK_SPACING = 10  # tick spacing of the 0.05% tier
+# Swaps used for the typical depth of the pool. A swap at the edge of a liquidity gap
+# shows a tiny L, while a real rebalance would be routed around that gap.
+LIQUIDITY_WINDOW = 500
+REBALANCE_CHECK_BLOCKS = 300  # the keeper looks at the position about once an hour
+# Median gasUsed of 430 real transactions in the tx_gas table: burn + swap + mint.
+GAS_PER_REBALANCE = 243_676 + 192_352 + 418_892
 Q96 = 2**96
 
 
@@ -82,19 +91,51 @@ def range_ticks(tick, width):
     return tick_lower, tick_upper
 
 
-def simulate_fixed_range(swaps, usd, width, fee_changes=()):
-    """Replay swaps for a fixed position, valuing fees at the final price.
+def gas_cost_usd(block_number, usdc_per_eth, gas_blocks, gas_prices):
+    """Return the USD gas cost of one rebalance at a block."""
+    index = max(bisect.bisect_right(gas_blocks, block_number) - 1, 0)
+    return GAS_PER_REBALANCE * gas_prices[index] / 10**18 * usdc_per_eth
+
+
+def price_impact_share(swap_usd, usdc_per_eth, sqrt_price, active_liquidity):
+    """Return the average price impact of a swap inside the active liquidity.
+
+    From amount1 = L * d(sqrtP), the average execution price moves by d(sqrtP) / sqrtP.
+    """
+    amount1 = swap_usd / usdc_per_eth * 10**WETH_DECIMALS
+    return amount1 / (active_liquidity * sqrt_price)
+
+
+def rebalance_cost(old_amounts, new_amounts, usdc_per_eth, sqrt_price, active_liquidity):
+    """Return (swap_fee_usd, price_impact_usd) of moving between two compositions."""
+    old_usdc = amounts_to_usd(old_amounts[0], 0, usdc_per_eth)
+    new_usdc = amounts_to_usd(new_amounts[0], 0, usdc_per_eth)
+    swap_usd = abs(new_usdc - old_usdc)
+
+    swap_fee = swap_usd * POOL_FEE
+    impact = swap_usd * price_impact_share(swap_usd, usdc_per_eth, sqrt_price, active_liquidity)
+    return swap_fee, impact
+
+
+def simulate_range(swaps, usd, width, fee_changes=(), gas=None, rebalance=False):
+    """Replay swaps for one position, valuing fees at the final price.
 
     Each swap is (amount0, amount1, sqrt_price_x96, liquidity, tick, block_number).
     The first swap sets the entry price. The event's liquidity and tick are the
     values after the swap, so swaps that cross ticks are approximated. fee_changes
-    is [(block_number, protocol_share)], oldest first.
+    is [(block_number, protocol_share)], oldest first. With rebalance=True, the
+    position is checked about once an hour, using the price at the end of a block
+    so that a sandwich inside one block is ignored. If it is out of range, it moves
+    to a new range around that price; gas is then (blocks, prices). Fees stay outside
+    the position and are not reinvested. Costs are paid from the position.
     """
     swaps = iter(swaps)
     try:
         first = next(swaps)
     except StopIteration:
         raise ValueError("No swaps in this period") from None
+    if rebalance and gas is None:
+        raise ValueError("Rebalancing needs gas prices")
 
     sqrt_price = int(first[2]) / Q96
     entry_price = DECIMALS_FACTOR / sqrt_price**2
@@ -106,15 +147,51 @@ def simulate_fixed_range(swaps, usd, width, fee_changes=()):
     start0, start1 = position_amounts(liquidity, sqrt_price, sqrt_lower, sqrt_upper)
 
     fee0 = fee1 = 0.0
-    total_swaps = swaps_in_range = 0
+    total_swaps = swaps_in_range = rebalances = 0
+    gas_usd = swap_fee_usd = impact_usd = 0.0
     protocol_share = 0.0
     pending_changes = list(fee_changes)
+    recent_liquidity = deque(maxlen=LIQUIDITY_WINDOW)
+    previous_block = first[5]
+    previous_tick = first[4]
+    next_check = first[5] + REBALANCE_CHECK_BLOCKS
 
     for amount0, amount1, sqrt_price_x96, active_liquidity, tick, block_number in swaps:
         total_swaps += 1
+
+        if (
+            rebalance
+            and block_number != previous_block
+            and block_number >= next_check
+        ):
+            next_check = block_number + REBALANCE_CHECK_BLOCKS
+            if not is_in_range(previous_tick, tick_lower, tick_upper):
+                price = DECIMALS_FACTOR / sqrt_price**2
+                old = position_amounts(liquidity, sqrt_price, sqrt_lower, sqrt_upper)
+                value = amounts_to_usd(old[0], old[1], price)
+
+                tick_lower, tick_upper = range_ticks(previous_tick, width)
+                sqrt_lower = tick_to_sqrt_price(tick_lower)
+                sqrt_upper = tick_to_sqrt_price(tick_upper)
+                target_liquidity = liquidity_for_usd(value, sqrt_price, sqrt_lower, sqrt_upper)
+                target = position_amounts(target_liquidity, sqrt_price, sqrt_lower, sqrt_upper)
+
+                typical_liquidity = statistics.median(recent_liquidity)
+                swap_fee, impact = rebalance_cost(old, target, price, sqrt_price, typical_liquidity)
+                gas_cost = gas_cost_usd(previous_block, price, *gas)
+                remaining = max(value - swap_fee - impact - gas_cost, 0.0)
+                liquidity = liquidity_for_usd(remaining, sqrt_price, sqrt_lower, sqrt_upper)
+
+                rebalances += 1
+                gas_usd += gas_cost
+                swap_fee_usd += swap_fee
+                impact_usd += impact
+
         sqrt_price = int(sqrt_price_x96) / Q96
+        recent_liquidity.append(int(active_liquidity))
         while pending_changes and block_number >= pending_changes[0][0]:
             protocol_share = pending_changes.pop(0)[1]
+
         if is_in_range(tick, tick_lower, tick_upper):
             swaps_in_range += 1
             earned0, earned1 = swap_fees(
@@ -122,6 +199,9 @@ def simulate_fixed_range(swaps, usd, width, fee_changes=()):
             )
             fee0 += earned0
             fee1 += earned1
+
+        previous_block = block_number
+        previous_tick = tick
 
     end_price = DECIMALS_FACTOR / sqrt_price**2
     end0, end1 = position_amounts(liquidity, sqrt_price, sqrt_lower, sqrt_upper)
@@ -137,6 +217,10 @@ def simulate_fixed_range(swaps, usd, width, fee_changes=()):
         "swaps": total_swaps,
         "swaps_in_range": swaps_in_range,
         "final_protocol_share": protocol_share,
+        "rebalances": rebalances,
+        "gas_usd": gas_usd,
+        "swap_fee_usd": swap_fee_usd,
+        "price_impact_usd": impact_usd,
         "fees_usd": fees_usd,
         "position_usd": position_usd,
         "hodl_usd": hodl_usd,
