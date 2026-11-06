@@ -85,6 +85,14 @@ CREATE TABLE IF NOT EXISTS fee_protocol_changes (
     PRIMARY KEY (block_number, log_index)
 );
 
+CREATE TABLE IF NOT EXISTS tx_gas (
+    op           TEXT    NOT NULL,  -- mint, burn or swap
+    tx_hash      TEXT    NOT NULL,
+    block_number INTEGER NOT NULL,
+    gas_used     INTEGER NOT NULL,
+    PRIMARY KEY (op, tx_hash)
+);
+
 CREATE TABLE IF NOT EXISTS checkpoints (
     event      TEXT    PRIMARY KEY,
     last_block INTEGER NOT NULL
@@ -98,6 +106,7 @@ EVENT_TABLES = (
     "collects",
     "gas_prices",
     "fee_protocol_changes",
+    "tx_gas",
 )
 
 

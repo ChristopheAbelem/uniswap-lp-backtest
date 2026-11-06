@@ -260,3 +260,63 @@ def test_collect_fee_protocol_is_idempotent(monkeypatch, tmp_path):
     collector.collect_fee_protocol(conn)
 
     assert conn.execute("SELECT COUNT(*) FROM fee_protocol_changes").fetchone()[0] == 1
+
+
+def receipt(to, gas=100_000):
+    return {"to": to, "blockNumber": hex(13000000), "gasUsed": hex(gas)}
+
+
+def test_changes_liquidity():
+    assert collector.changes_liquidity({"data": "0x" + word(5) + word(1)})
+    assert not collector.changes_liquidity({"data": "0x" + word(0) + word(1)})
+
+
+def test_collect_gas_used_keeps_only_the_expected_contracts(monkeypatch, tmp_path):
+    monkeypatch.setattr(collector, "GAS_SAMPLE_BLOCKS", (13_000_000,))
+    monkeypatch.setattr(collector, "GAS_SAMPLE_SIZE", 2)
+    logs = {
+        collector.MINT_TOPIC: [
+            {"transactionHash": "0xa", "data": "0x"},
+            {"transactionHash": "0xa", "data": "0x"},
+            {"transactionHash": "0xb", "data": "0x"},
+        ],
+        collector.BURN_TOPIC: [
+            {"transactionHash": "0xc", "data": "0x" + word(0)},
+            {"transactionHash": "0xd", "data": "0x" + word(9)},
+        ],
+        collector.SWAP_TOPIC: [],
+    }
+    receipts = {
+        "0xa": receipt(collector.POSITION_MANAGER, 400_000),
+        "0xb": receipt("0x" + "9" * 40),
+        "0xd": receipt(collector.POSITION_MANAGER, 250_000),
+    }
+    monkeypatch.setattr(collector, "fetch_logs", lambda topic, *args: logs[topic])
+    monkeypatch.setattr(collector, "fetch_receipt", receipts.__getitem__)
+    conn = connect(tmp_path / "test.sqlite")
+
+    collector.collect_gas_used(conn)
+
+    rows = conn.execute("SELECT op, tx_hash, gas_used FROM tx_gas ORDER BY tx_hash").fetchall()
+    assert rows == [("mint", "0xa", 400_000), ("burn", "0xd", 250_000)]
+
+
+def test_collect_gas_used_stops_at_the_sample_size(monkeypatch, tmp_path):
+    monkeypatch.setattr(collector, "GAS_SAMPLE_BLOCKS", (13_000_000,))
+    monkeypatch.setattr(collector, "GAS_SAMPLE_SIZE", 2)
+    swaps = [{"transactionHash": f"0x{n}", "data": "0x"} for n in range(5)]
+    logs = {collector.MINT_TOPIC: [], collector.BURN_TOPIC: [], collector.SWAP_TOPIC: swaps}
+    calls = []
+
+    def fake_receipt(tx_hash):
+        calls.append(tx_hash)
+        return receipt(collector.SWAP_ROUTERS[0])
+
+    monkeypatch.setattr(collector, "fetch_logs", lambda topic, *args: logs[topic])
+    monkeypatch.setattr(collector, "fetch_receipt", fake_receipt)
+    conn = connect(tmp_path / "test.sqlite")
+
+    collector.collect_gas_used(conn)
+    collector.collect_gas_used(conn)
+
+    assert calls == ["0x0", "0x1"]
