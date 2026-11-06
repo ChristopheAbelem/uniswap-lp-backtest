@@ -38,6 +38,13 @@ def run(args):
     print(f"Replay time: {elapsed:.1f} s.")
 
 
+def validate_engine(args):
+    from lpbacktest.validation import validate
+
+    rows = validate(connect())
+    print(f"Validated positions: {len(rows)}. Saved to results/validation.csv.")
+
+
 def main():
     parser = argparse.ArgumentParser(prog="lpbacktest")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -49,6 +56,9 @@ def main():
     run_parser.add_argument("--usd", type=float, default=100_000)
     run_parser.add_argument("--rebalance", action="store_true", help="move the range on exit")
     run_parser.set_defaults(handler=run)
+
+    validate_parser = commands.add_parser("validate", help="compare fees with real positions")
+    validate_parser.set_defaults(handler=validate_engine)
 
     args = parser.parse_args()
     args.handler(args)

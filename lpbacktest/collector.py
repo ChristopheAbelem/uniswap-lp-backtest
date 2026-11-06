@@ -89,20 +89,37 @@ def block_at_date(date):
     return int(result)
 
 
-def fetch_logs(topic, from_block, to_block):
+def fetch_logs(topic, from_block, to_block, address=POOL, topic1=None):
     """Return up to PAGE_SIZE raw logs of one event, oldest first."""
-    return call_api(
-        {
-            "module": "logs",
-            "action": "getLogs",
-            "address": POOL,
-            "topic0": topic,
-            "fromBlock": from_block,
-            "toBlock": to_block,
-            "page": 1,
-            "offset": PAGE_SIZE,
-        }
-    )
+    params = {
+        "module": "logs",
+        "action": "getLogs",
+        "address": address,
+        "topic0": topic,
+        "fromBlock": from_block,
+        "toBlock": to_block,
+        "page": 1,
+        "offset": PAGE_SIZE,
+    }
+    if topic1 is not None:
+        params.update(topic1=topic1, topic0_1_opr="and")
+    return call_api(params)
+
+
+def fetch_all_logs(topic, from_block, to_block, address=POOL, topic1=None):
+    """Return every log of one event in a block range, without duplicates."""
+    found = {}
+    while from_block <= to_block:
+        logs = fetch_logs(topic, from_block, to_block, address, topic1)
+        for log in logs:
+            found[(log["blockNumber"], log["logIndex"])] = log
+        if len(logs) < PAGE_SIZE:
+            break
+        last_block = hex_to_int(logs[-1]["blockNumber"])
+        if last_block == from_block:
+            raise RuntimeError(f"Block {last_block} has more events than one page")
+        from_block = last_block
+    return list(found.values())
 
 
 def fetch_swap_logs(from_block, to_block):

@@ -117,6 +117,26 @@ def rebalance_cost(old_amounts, new_amounts, usdc_per_eth, sqrt_price, active_li
     return swap_fee, impact
 
 
+def replay_real_position(swaps, liquidity, tick_lower, tick_upper, fee_changes=()):
+    """Return the raw (fee0, fee1) of a position that existed on-chain.
+
+    The position is real, so it is already inside the event's liquidity.
+    """
+    fee0 = fee1 = 0.0
+    protocol_share = 0.0
+    pending_changes = list(fee_changes)
+
+    for amount0, amount1, _, active_liquidity, tick, block_number in swaps:
+        while pending_changes and block_number >= pending_changes[0][0]:
+            protocol_share = pending_changes.pop(0)[1]
+        if is_in_range(tick, tick_lower, tick_upper):
+            others = max(int(active_liquidity) - liquidity, 0)
+            earned0, earned1 = swap_fees(int(amount0), int(amount1), liquidity, others, protocol_share)
+            fee0 += earned0
+            fee1 += earned1
+    return fee0, fee1
+
+
 def simulate_range(swaps, usd, width, fee_changes=(), gas=None, rebalance=False):
     """Replay swaps for one position, valuing fees at the final price.
 
