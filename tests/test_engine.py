@@ -1,15 +1,21 @@
-import math
+from itertools import count
 from math import floor, sqrt
 
 import pytest
 
 from lpbacktest.engine import (
+    GAS_PER_REBALANCE,
+    GAS_BURN,
+    GAS_MINT,
     amounts_to_usd,
+    gas_cost_usd,
     is_in_range,
     liquidity_for_usd,
     position_amounts,
+    price_impact_share,
     range_ticks,
-    simulate_fixed_range,
+    rebalance_cost,
+    simulate_range,
     sqrt_price_to_usdc_per_eth,
     swap_fees,
     tick_to_sqrt_price,
@@ -121,19 +127,23 @@ def test_range_ticks_use_the_tick_spacing_and_contain_the_width():
     assert 1.0001 ** (upper - 194996) == pytest.approx(1.1, rel=1e-2)
 
 
-def swap_at(tick, amount0=0, amount1=0, active_liquidity=10**18, block=1):
+BLOCKS = count(1)
+
+
+def swap_at(tick, amount0=0, amount1=0, active_liquidity=10**18, block=None):
+    block = next(BLOCKS) if block is None else block
     sqrt_price_x96 = int(1.0001 ** (tick / 2) * 2**96)
     return (amount0, amount1, sqrt_price_x96, active_liquidity, tick, block)
 
 
 def test_flat_price_has_no_impermanent_loss():
-    swaps = [swap_at(195000)] + [swap_at(195000, amount0=10**9)] * 3
+    swaps = [swap_at(195000)] + [swap_at(195000, amount0=10**9) for _ in range(3)]
 
-    result = simulate_fixed_range(swaps, 100_000, 0.10)
+    result = simulate_range(swaps, 100_000, 0.10)
 
     assert result["swaps"] == 3
     assert result["swaps_in_range"] == 3
-    assert result["impermanent_loss_usd"] == pytest.approx(0, abs=1e-6)
+    assert result["position_vs_hodl_usd"] == pytest.approx(0, abs=1e-6)
     assert result["net_vs_hodl_usd"] == pytest.approx(result["fees_usd"])
     assert result["fees_usd"] > 0
 
@@ -141,12 +151,12 @@ def test_flat_price_has_no_impermanent_loss():
 def test_price_exit_stops_fees_and_creates_a_loss():
     swaps = [swap_at(195000), swap_at(195000, amount0=10**9), swap_at(200000, amount0=10**9)]
 
-    result = simulate_fixed_range(swaps, 100_000, 0.10)
-    only_first = simulate_fixed_range(swaps[:2], 100_000, 0.10)
+    result = simulate_range(swaps, 100_000, 0.10)
+    only_first = simulate_range(swaps[:2], 100_000, 0.10)
 
     assert result["swaps"] == 2
     assert result["swaps_in_range"] == 1
-    assert result["impermanent_loss_usd"] < 0
+    assert result["position_vs_hodl_usd"] < 0
     # Fee tokens are the same, whatever the final price.
     assert result["fees_usd"] == pytest.approx(only_first["fees_usd"])
 
@@ -172,14 +182,148 @@ def test_protocol_fee_applies_only_after_its_block():
     swaps = [swap_at(195000, block=1)]
     swaps += [swap_at(195000, amount0=10**9, block=block) for block in (5, 10, 15)]
 
-    before = simulate_fixed_range(swaps, 100_000, 0.10)
-    after = simulate_fixed_range(swaps, 100_000, 0.10, fee_changes=[(10, 0.25)])
+    before = simulate_range(swaps, 100_000, 0.10)
+    after = simulate_range(swaps, 100_000, 0.10, fee_changes=[(10, 0.25)])
 
     # Two of the three swaps pay 75% of the fee.
     assert after["fees_usd"] == pytest.approx(before["fees_usd"] * (1 + 0.75 * 2) / 3)
     assert after["final_protocol_share"] == 0.25
 
 
+def test_gas_cost_uses_the_last_known_price():
+    blocks, prices = [100, 400], [10 * 10**9, 50 * 10**9]
+
+    # 10 gwei at $2,000.
+    expected = GAS_PER_REBALANCE * 10e9 / 1e18 * 2000
+    assert gas_cost_usd(399, 2000, blocks, prices) == pytest.approx(expected)
+    assert gas_cost_usd(400, 2000, blocks, prices) == pytest.approx(expected * 5)
+
+
+def test_price_impact_matches_constant_liquidity_math():
+    # amount1 = L * d(sqrtP): 1 token1 raw at sqrt_price 1 and L = 1,000 moves 0.1%.
+    assert price_impact_share(1e-18 * 2000, 2000, 1.0, 1000) == pytest.approx(0.001)
+
+
+def test_rebalance_cost_charges_only_the_swapped_value():
+    old = (0, 50 * 10**18)  # 50 WETH at $2,000
+    new = (50_000 * 10**6, 25 * 10**18)  # same value, half in USDC
+
+    swap_fee, impact = rebalance_cost(old, new, 2000, 1.0, 10**24)
+
+    assert swap_fee == pytest.approx(25)
+    assert impact == pytest.approx(50_000 * 25e18 / 1e24)
+
+
+def test_exit_without_rebalance_has_no_costs():
+    swaps = [swap_at(195000), swap_at(200000, amount0=10**9)]
+
+    result = simulate_range(swaps, 100_000, 0.10)
+
+    assert result["rebalances"] == 0
+    assert result["gas_usd"] == 0
+
+
+def test_rebalance_moves_the_range_and_pays_costs():
+    gas = ([1], [10 * 10**9])
+    swaps = [
+        swap_at(195000, block=1),
+        swap_at(200000, amount0=10**9, active_liquidity=10**21, block=2),
+        swap_at(200000, amount0=10**9, active_liquidity=10**21, block=400),
+    ]
+
+    moved = simulate_range(swaps, 100_000, 0.10, gas=gas, rebalance=True)
+
+    assert moved["rebalances"] == 1
+    assert moved["tick_lower"] < 200000 < moved["tick_upper"]
+    assert moved["swaps_in_range"] == 1
+    total_costs = moved["gas_usd"] + moved["swap_fee_usd"] + moved["price_impact_usd"]
+    assert total_costs > 0
+    # Fixed pays only mint and burn gas here, so compare with those included.
+    fixed = simulate_range(swaps, 100_000, 0.10, gas=gas)
+    extra_costs = total_costs - fixed["gas_usd"]
+    # With no price move after the rebalance, value falls by exactly the extra costs.
+    assert moved["position_usd"] == pytest.approx(fixed["position_usd"] - extra_costs, rel=1e-4)
+
+
+def test_sandwich_inside_one_block_does_not_trigger_a_rebalance():
+    gas = ([1], [10 * 10**9])
+    swaps = [
+        swap_at(195000, block=1),
+        swap_at(200000, block=500),  # front leg
+        swap_at(195000, block=500),  # back leg, same block
+        swap_at(195000, block=1000),
+    ]
+
+    result = simulate_range(swaps, 100_000, 0.10, gas=gas, rebalance=True)
+
+    assert result["rebalances"] == 0
+
+
+def test_position_is_checked_about_once_an_hour():
+    gas = ([1], [10 * 10**9])
+    swaps = [swap_at(195000, block=1), swap_at(200000, block=2), swap_at(200000, block=100)]
+
+    result = simulate_range(swaps, 100_000, 0.10, gas=gas, rebalance=True)
+
+    assert result["rebalances"] == 0
+
+
+def test_price_impact_ignores_a_liquidity_gap():
+    gas = ([1], [10 * 10**9])
+    deep = [swap_at(195000, active_liquidity=10**21, block=block) for block in range(1, 21)]
+    late = swap_at(200000, active_liquidity=10**21, block=500)
+
+    def run(exit_liquidity):
+        exit_swap = swap_at(200000, active_liquidity=exit_liquidity, block=21)
+        return simulate_range(deep + [exit_swap, late], 100_000, 0.10, gas=gas, rebalance=True)
+
+    assert run(10**16)["price_impact_usd"] == pytest.approx(run(10**21)["price_impact_usd"])
+
+
+def test_rebalance_needs_gas_prices():
+    with pytest.raises(ValueError, match="gas prices"):
+        simulate_range([swap_at(195000)], 100_000, 0.10, rebalance=True)
+
+
+def test_entry_uses_the_price_at_the_end_of_the_first_block():
+    swaps = [
+        swap_at(200000, block=1),  # front leg of a sandwich
+        swap_at(195000, block=1),  # back leg
+        swap_at(195000, amount0=10**9, block=2),
+    ]
+
+    result = simulate_range(swaps, 100_000, 0.10)
+
+    assert result["entry_price"] == pytest.approx(simulate_range(swaps[1:], 100_000, 0.10)["entry_price"])
+    assert result["swaps"] == 1
+
+
+def test_position_pays_entry_and_exit_gas_and_hodl_does_not():
+    gas = ([1], [10 * 10**9])
+    swaps = [swap_at(195000, block=1), swap_at(195000, block=2)]
+
+    free = simulate_range(swaps, 100_000, 0.10)
+    paid = simulate_range(swaps, 100_000, 0.10, gas=gas)
+
+    price = paid["entry_price"]
+    expected = (GAS_MINT + GAS_BURN) * 10e9 / 1e18 * price
+    assert paid["gas_usd"] == pytest.approx(expected)
+    assert paid["position_usd"] == pytest.approx(free["position_usd"] - expected)
+    assert paid["hodl_usd"] == pytest.approx(free["hodl_usd"])
+
+
+def test_fees_from_thin_liquidity_are_reported_apart():
+    swaps = [
+        swap_at(195000),
+        swap_at(195000, amount0=10**9, active_liquidity=10**24),
+        swap_at(195000, amount0=10**9, active_liquidity=1),
+    ]
+
+    result = simulate_range(swaps, 100_000, 0.10)
+
+    assert 0 < result["thin_liquidity_fees_usd"] <= result["fees_usd"]
+
+
 def test_no_swaps_is_an_error():
     with pytest.raises(ValueError):
-        simulate_fixed_range([], 100_000, 0.10)
+        simulate_range([], 100_000, 0.10)

@@ -165,6 +165,19 @@ def load_swaps(conn, start_time, end_time):
             yield swap
 
 
+def load_swaps_by_block(conn, first_block, last_block):
+    """Return the swaps of a block range for the engine, in chain order."""
+    return conn.execute(
+        """
+        SELECT amount0, amount1, sqrt_price_x96, liquidity, tick, block_number
+        FROM swaps
+        WHERE block_number BETWEEN ? AND ?
+        ORDER BY block_number, log_index
+        """,
+        (first_block, last_block),
+    ).fetchall()
+
+
 def load_fee_changes(conn):
     """Return [(block_number, protocol_share)] of the pool's fee changes."""
     rows = conn.execute(
@@ -181,6 +194,23 @@ def load_fee_changes(conn):
             raise ValueError(f"Different protocol fees per token at block {block_number}")
         changes.append((block_number, 1 / fee0 if fee0 else 0.0))
     return changes
+
+
+def load_gas_prices(conn):
+    """Return (blocks, prices in wei), repeating the last price in empty blocks."""
+    rows = conn.execute(
+        "SELECT block_number, median_price_wei FROM gas_prices ORDER BY block_number"
+    ).fetchall()
+
+    blocks, prices = [], []
+    for block_number, price in rows:
+        if price is None:
+            if not prices:
+                continue
+            price = prices[-1]
+        blocks.append(block_number)
+        prices.append(price)
+    return blocks, prices
 
 
 def get_checkpoint(conn, event):
