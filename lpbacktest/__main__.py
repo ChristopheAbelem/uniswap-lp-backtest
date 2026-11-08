@@ -65,6 +65,36 @@ def run(args):
         )
 
 
+def print_rows(title, rows):
+    print(title)
+    print(
+        f"{'Strategy':12}{'Param':>6}{'IR':>7}{'Mean':>8}{'Median':>8}"
+        f"{'Beat':>6}{'Worst':>8}{'w/o thin':>9}{'Costs':>7}{'Moves':>7}"
+    )
+    for row in rows:
+        ratio = "n/a" if row["information_ratio"] is None else f"{row['information_ratio']:.2f}"
+        param = "" if row["param"] is None else f"{row['param']:g}"
+        print(
+            f"{row['strategy']:12}{param:>6}{ratio:>7}{row['mean_vs_hodl']:>8.1%}"
+            f"{row['median_vs_hodl']:>8.1%}{row['share_beating_hodl']:>6.0%}"
+            f"{row['worst_vs_hodl']:>8.1%}{row['mean_vs_hodl_without_thin']:>9.1%}"
+            f"{row['mean_costs']:>7.1%}{row['mean_rebalances']:>7.1f}"
+        )
+    print()
+
+
+def calibrate_strategies(args):
+    from lpbacktest.experiments import HORIZON_DAYS, TEST, TRAIN, calibrate
+
+    started = time.perf_counter()
+    train_rows, test_rows = calibrate(usd=args.usd, workers=args.workers)
+    print(f"Windows of {HORIZON_DAYS} days, opened monthly. Results vs HODL with the same tokens.")
+    print()
+    print_rows(f"Train, {TRAIN[0]} to {TRAIN[1]} (sorted by information ratio):", train_rows)
+    print_rows(f"Test, {TEST[0]} to {TEST[1]} (best train parameter of each strategy):", test_rows)
+    print(f"Saved to results/. Time: {time.perf_counter() - started:.0f} s.")
+
+
 def validate_engine(args):
     from lpbacktest.validation import validate
 
@@ -88,6 +118,11 @@ def main():
     run_parser.add_argument("--k", type=float, default=2.0, help="daily volatilities per side")
     run_parser.add_argument("--usd", type=float, default=100_000)
     run_parser.set_defaults(handler=run)
+
+    calibrate_parser = commands.add_parser("calibrate", help="choose parameters, then test them")
+    calibrate_parser.add_argument("--usd", type=float, default=100_000)
+    calibrate_parser.add_argument("--workers", type=int, default=4)
+    calibrate_parser.set_defaults(handler=calibrate_strategies)
 
     validate_parser = commands.add_parser("validate", help="compare fees with real positions")
     validate_parser.set_defaults(handler=validate_engine)
