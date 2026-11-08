@@ -5,6 +5,7 @@ import calendar
 import time
 
 from lpbacktest.engine import hourly_closes, simulate
+from lpbacktest.metrics import summarize
 from lpbacktest.storage import connect, load_fee_changes, load_gas_prices, load_swaps
 from lpbacktest.strategies import build
 
@@ -45,6 +46,23 @@ def run(args):
     print(f"Rebalances: {result['rebalances']}.")
     print(f"Costs: gas ${result['gas_usd']:,.2f}, swap fees ${result['swap_fee_usd']:,.2f}, price impact ${result['price_impact_usd']:,.2f}.")
     print(f"Replay time: {elapsed:.1f} s.")
+
+    summary = summarize(result, args.usd, (end - start) / 86_400)
+    print()
+    print(f"Fee APR: {summary['fee_apr']:.1%}. Costs: {summary['costs_pct']:.2%} of the position.")
+    print(f"{'':18}{'Return':>10}{'Max drawdown':>14}{'Sharpe':>9}")
+    for name, label in [
+        ("lp", "LP strategy"),
+        ("hodl_same_tokens", "HODL same tokens"),
+        ("hodl_50_50", "HODL 50/50"),
+        ("usdc", "100% USDC"),
+    ]:
+        sharpe = summary[f"{name}_sharpe"]
+        sharpe_text = "n/a" if sharpe is None else f"{sharpe:.2f}"
+        print(
+            f"{label:18}{summary[f'{name}_return']:>10.1%}"
+            f"{summary[f'{name}_max_drawdown']:>14.1%}{sharpe_text:>9}"
+        )
 
 
 def validate_engine(args):

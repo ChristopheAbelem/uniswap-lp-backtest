@@ -116,8 +116,9 @@ def test_path_ends_at_the_final_values():
 
     result = simulate(swaps, 100_000, FixedRange(0.1))
 
-    block, lp_value, hodl_value = result["path"][-1]
+    block, price, lp_value, hodl_value = result["path"][-1]
     assert block == 800
+    assert price == pytest.approx(result["end_price"])
     assert lp_value == pytest.approx(result["position_usd"] + result["fees_usd"])
     assert hodl_value == pytest.approx(result["hodl_usd"])
     assert len(result["path"]) == 3  # checks at blocks 400 and 800, then the end

@@ -171,7 +171,7 @@ def simulate(swaps, usd, strategy, fee_changes=(), gas=None, closes=()):
     strategy.range(tick, closes) returns the ticks of a new range, and closes are the
     hourly prices known at that moment: the warm-up closes passed in, then one price
     per check. The position is checked about once an hour at the end of a block,
-    when its value is also recorded in "path". If strategy.rebalances is true and the
+    when (block, price, position value with fees, HODL value) is added to "path". If strategy.rebalances is true and the
     position is out of range, it moves to a new range from strategy.range. Fees stay
     outside the position and are not reinvested. Costs are paid from the position.
     """
@@ -226,6 +226,7 @@ def simulate(swaps, usd, strategy, fee_changes=(), gas=None, closes=()):
             path.append(
                 (
                     previous_block,
+                    price,
                     value + amounts_to_usd(fee0, fee1, price),
                     amounts_to_usd(start0, start1, price),
                 )
@@ -277,7 +278,7 @@ def simulate(swaps, usd, strategy, fee_changes=(), gas=None, closes=()):
         exit_gas = gas_cost_usd(previous_block, end_price, *gas, GAS_BURN)
         gas_usd += exit_gas
         position_usd = max(position_usd - exit_gas, 0.0)
-    path.append((previous_block, position_usd + fees_usd, hodl_usd))
+    path.append((previous_block, end_price, position_usd + fees_usd, hodl_usd))
 
     return {
         "entry_price": entry_price,
