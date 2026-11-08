@@ -4,8 +4,11 @@ import argparse
 import calendar
 import time
 
-from lpbacktest.engine import simulate_range
+from lpbacktest.engine import hourly_closes, simulate
 from lpbacktest.storage import connect, load_fee_changes, load_gas_prices, load_swaps
+from lpbacktest.strategies import build
+
+WARM_UP_SECONDS = 8 * 86_400  # a week of hourly prices for volatility, plus margin
 
 
 def to_timestamp(date):
@@ -14,16 +17,19 @@ def to_timestamp(date):
 
 def run(args):
     conn = connect()
-    swaps = load_swaps(conn, to_timestamp(args.start), to_timestamp(args.end))
+    start, end = to_timestamp(args.start), to_timestamp(args.end)
+    strategy = build(args.strategy, args.width, args.k)
+    closes = hourly_closes(load_swaps(conn, start - WARM_UP_SECONDS, start))
+    swaps = load_swaps(conn, start, end)
     fee_changes = load_fee_changes(conn)
     gas = load_gas_prices(conn)
 
     started = time.perf_counter()
-    result = simulate_range(swaps, args.usd, args.width, fee_changes, gas, args.rebalance)
+    result = simulate(swaps, args.usd, strategy, fee_changes, gas, closes)
     elapsed = time.perf_counter() - started
 
     share_in_range = result["swaps_in_range"] / result["swaps"]
-    print(f"Period: {args.start} to {args.end}. Position: ${args.usd:,.0f}, +/-{args.width:.0%}.")
+    print(f"Period: {args.start} to {args.end}. Position: ${args.usd:,.0f}. Strategy: {strategy.name}.")
     print(f"ETH price: ${result['entry_price']:,.2f} to ${result['end_price']:,.2f}.")
     print(f"Ticks: {result['tick_lower']} to {result['tick_upper']}.")
     print(f"Swaps: {result['swaps']:,}. In range: {share_in_range:.1%}.")
@@ -52,12 +58,17 @@ def main():
     parser = argparse.ArgumentParser(prog="lpbacktest")
     commands = parser.add_subparsers(dest="command", required=True)
 
-    run_parser = commands.add_parser("run", help="replay a fixed range position")
+    run_parser = commands.add_parser("run", help="replay one strategy")
     run_parser.add_argument("--start", required=True, help="start date, YYYY-MM-DD")
     run_parser.add_argument("--end", required=True, help="end date, YYYY-MM-DD")
+    run_parser.add_argument(
+        "--strategy",
+        choices=["full_range", "fixed", "rebalance", "vol_scaled"],
+        default="fixed",
+    )
     run_parser.add_argument("--width", type=float, default=0.1, help="0.1 means +/-10%%")
+    run_parser.add_argument("--k", type=float, default=2.0, help="daily volatilities per side")
     run_parser.add_argument("--usd", type=float, default=100_000)
-    run_parser.add_argument("--rebalance", action="store_true", help="move the range on exit")
     run_parser.set_defaults(handler=run)
 
     validate_parser = commands.add_parser("validate", help="compare fees with real positions")

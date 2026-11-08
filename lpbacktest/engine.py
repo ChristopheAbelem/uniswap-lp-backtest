@@ -142,7 +142,22 @@ def replay_real_position(swaps, liquidity, tick_lower, tick_upper, fee_changes=(
     return fee0, fee1
 
 
+def hourly_closes(swaps):
+    """Return the last price of each REBALANCE_CHECK_BLOCKS bucket, oldest first."""
+    closes = {}
+    for swap in swaps:
+        closes[swap[5] // REBALANCE_CHECK_BLOCKS] = sqrt_price_to_usdc_per_eth(int(swap[2]))
+    return [closes[bucket] for bucket in sorted(closes)]
+
+
 def simulate_range(swaps, usd, width, fee_changes=(), gas=None, rebalance=False):
+    """Replay a +/- width range, optionally moved when the price leaves it."""
+    from lpbacktest.strategies import FixedRange
+
+    return simulate(swaps, usd, FixedRange(width, rebalance), fee_changes, gas)
+
+
+def simulate(swaps, usd, strategy, fee_changes=(), gas=None, closes=()):
     """Replay swaps for one position, valuing fees at the final price.
 
     Each swap is (amount0, amount1, sqrt_price_x96, liquidity, tick, block_number).
@@ -151,17 +166,21 @@ def simulate_range(swaps, usd, width, fee_changes=(), gas=None, rebalance=False)
     after the swap, so swaps that cross ticks are approximated. fee_changes is
     [(block_number, protocol_share)], oldest first. gas is (blocks, prices): with it,
     the position pays mint gas at the start and burn gas at the end. HODL starts
-    with the same tokens and pays neither. With rebalance=True, the position is
-    checked about once an hour at the end of a block. If it is out of range, it
-    moves to a new range around that price. Fees stay outside the position and are
-    not reinvested. Costs are paid from the position.
+    with the same tokens and pays neither.
+
+    strategy.range(tick, closes) returns the ticks of a new range, and closes are the
+    hourly prices known at that moment: the warm-up closes passed in, then one price
+    per check. The position is checked about once an hour at the end of a block,
+    when its value is also recorded in "path". If strategy.rebalances is true and the
+    position is out of range, it moves to a new range from strategy.range. Fees stay
+    outside the position and are not reinvested. Costs are paid from the position.
     """
     swaps = iter(swaps)
     try:
         first = next(swaps)
     except StopIteration:
         raise ValueError("No swaps in this period") from None
-    if rebalance and gas is None:
+    if strategy.rebalances and gas is None:
         raise ValueError("Rebalancing needs gas prices")
 
     for swap in swaps:
@@ -172,7 +191,8 @@ def simulate_range(swaps, usd, width, fee_changes=(), gas=None, rebalance=False)
 
     sqrt_price = int(first[2]) / Q96
     entry_price = DECIMALS_FACTOR / sqrt_price**2
-    tick_lower, tick_upper = range_ticks(first[4], width)
+    closes = list(closes)
+    tick_lower, tick_upper = strategy.range(first[4], closes)
     sqrt_lower = tick_to_sqrt_price(tick_lower)
     sqrt_upper = tick_to_sqrt_price(tick_upper)
 
@@ -192,22 +212,27 @@ def simulate_range(swaps, usd, width, fee_changes=(), gas=None, rebalance=False)
     previous_block = first[5]
     previous_tick = first[4]
     next_check = first[5] + REBALANCE_CHECK_BLOCKS
+    path = []
 
     for amount0, amount1, sqrt_price_x96, active_liquidity, tick, block_number in swaps:
         total_swaps += 1
 
-        if (
-            rebalance
-            and block_number != previous_block
-            and block_number >= next_check
-        ):
+        if block_number != previous_block and block_number >= next_check:
             next_check = block_number + REBALANCE_CHECK_BLOCKS
-            if not is_in_range(previous_tick, tick_lower, tick_upper):
-                price = DECIMALS_FACTOR / sqrt_price**2
-                old = position_amounts(liquidity, sqrt_price, sqrt_lower, sqrt_upper)
-                value = amounts_to_usd(old[0], old[1], price)
+            price = DECIMALS_FACTOR / sqrt_price**2
+            closes.append(price)
+            old = position_amounts(liquidity, sqrt_price, sqrt_lower, sqrt_upper)
+            value = amounts_to_usd(old[0], old[1], price)
+            path.append(
+                (
+                    previous_block,
+                    value + amounts_to_usd(fee0, fee1, price),
+                    amounts_to_usd(start0, start1, price),
+                )
+            )
 
-                tick_lower, tick_upper = range_ticks(previous_tick, width)
+            if strategy.rebalances and not is_in_range(previous_tick, tick_lower, tick_upper):
+                tick_lower, tick_upper = strategy.range(previous_tick, closes)
                 sqrt_lower = tick_to_sqrt_price(tick_lower)
                 sqrt_upper = tick_to_sqrt_price(tick_upper)
                 target_liquidity = liquidity_for_usd(value, sqrt_price, sqrt_lower, sqrt_upper)
@@ -252,6 +277,7 @@ def simulate_range(swaps, usd, width, fee_changes=(), gas=None, rebalance=False)
         exit_gas = gas_cost_usd(previous_block, end_price, *gas, GAS_BURN)
         gas_usd += exit_gas
         position_usd = max(position_usd - exit_gas, 0.0)
+    path.append((previous_block, position_usd + fees_usd, hodl_usd))
 
     return {
         "entry_price": entry_price,
@@ -271,4 +297,5 @@ def simulate_range(swaps, usd, width, fee_changes=(), gas=None, rebalance=False)
         "hodl_usd": hodl_usd,
         "position_vs_hodl_usd": position_usd - hodl_usd,
         "net_vs_hodl_usd": position_usd + fees_usd - hodl_usd,
+        "path": path,
     }
