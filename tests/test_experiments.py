@@ -85,6 +85,7 @@ def window(strategy, param, excess, costs=0.01):
         "period": "train",
         "strategy": strategy,
         "param": param,
+        "usd": 100_000,
         "net_vs_hodl_pct": excess,
         "net_vs_hodl_without_thin_pct": excess,
         "costs_pct": costs,
@@ -113,3 +114,40 @@ def test_choose_best_prefers_steady_excess_over_a_lucky_one():
     best = experiments.choose_best(experiments.aggregate(rows))
 
     assert best["fixed"]["param"] == 0.5
+
+
+def test_load_choices_reads_the_best_parameters(tmp_path):
+    rows = [window("fixed", 0.1, value) for value in (0.30, -0.20, 0.25, -0.15)]
+    rows += [window("fixed", 0.5, value) for value in (0.02, 0.03, 0.02, 0.03)]
+    rows += [window("full_range", None, value) for value in (0.01, 0.02)]
+    path = tmp_path / "calibration_train.csv"
+    experiments.save(experiments.aggregate(rows), experiments.SUMMARY_COLUMNS, path)
+
+    assert sorted(experiments.load_choices(path), key=str) == sorted(
+        [("fixed", 0.5), ("full_range", None)], key=str
+    )
+
+
+def test_compare_by_regime_and_size(tmp_path):
+    db_path = tmp_path / "pool.sqlite"
+    make_db(db_path)
+    regimes = (("first", "2021-01-10", "2021-03-01"), ("second", "2021-03-01", "2021-06-01"))
+
+    summary = experiments.compare(
+        choices=[("fixed", 0.05), ("full_range", None)],
+        sizes=(10_000, 100_000),
+        regimes=regimes,
+        db_path=db_path,
+        workers=1,
+        results_dir=tmp_path,
+        horizon_days=30,
+    )
+
+    assert len(summary) == 2 * 2 * 2  # regimes x strategies x sizes
+    assert [row["period"] for row in summary[:4]] == ["first"] * 4
+    small, large = (
+        next(r for r in summary if r["period"] == "first" and r["strategy"] == "fixed" and r["usd"] == usd)
+        for usd in (10_000, 100_000)
+    )
+    # Gas is a fixed amount in dollars, so it weighs more on a smaller position.
+    assert small["mean_costs"] > large["mean_costs"]

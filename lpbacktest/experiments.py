@@ -25,6 +25,13 @@ WARM_UP_SECONDS = 8 * 86_400  # a week of hourly prices for volatility, plus mar
 TRAIN = ("2021-07-01", "2024-01-01")
 TEST = ("2024-01-01", "2026-11-01")
 HORIZON_DAYS = 90
+REGIMES = (
+    ("2021 H2", "2021-07-01", "2022-01-01"),
+    ("2022", "2022-01-01", "2023-01-01"),
+    ("2023-24", "2023-01-01", "2025-01-01"),
+    ("2025-26", "2025-01-01", "2026-11-01"),
+)
+SIZES = (10_000, 100_000, 1_000_000)
 CANDIDATES = (
     [("full_range", None)]
     + [("fixed", width) for width in (0.01, 0.02, 0.05, 0.1, 0.2, 0.5)]
@@ -55,6 +62,7 @@ SUMMARY_COLUMNS = [
     "period",
     "strategy",
     "param",
+    "usd",
     "windows",
     "information_ratio",
     "mean_vs_hodl",
@@ -137,10 +145,11 @@ def aggregate(rows):
     """Return one summary per strategy and parameter over its windows."""
     grouped = {}
     for row in rows:
-        grouped.setdefault((row["period"], row["strategy"], row["param"]), []).append(row)
+        key = (row["period"], row["strategy"], row["param"], row["usd"])
+        grouped.setdefault(key, []).append(row)
 
     summaries = []
-    for (period, strategy, param), group in grouped.items():
+    for (period, strategy, param, usd), group in grouped.items():
         excess = [row["net_vs_hodl_pct"] for row in group]
         spread = statistics.stdev(excess) if len(excess) > 1 else 0.0
         summaries.append(
@@ -148,6 +157,7 @@ def aggregate(rows):
                 "period": period,
                 "strategy": strategy,
                 "param": param,
+                "usd": usd,
                 "windows": len(group),
                 "information_ratio": statistics.mean(excess) / spread if spread > 0 else None,
                 "mean_vs_hodl": statistics.mean(excess),
@@ -226,3 +236,45 @@ def calibrate(
     save(test_windows, WINDOW_COLUMNS, results_dir / "calibration_test_windows.csv")
     save(test_summary, SUMMARY_COLUMNS, results_dir / "calibration_test.csv")
     return train_summary, test_summary
+
+
+def load_choices(path):
+    """Return [(strategy, param)] chosen in a saved train summary."""
+    with open(path, newline="") as file:
+        rows = list(csv.DictReader(file))
+    for row in rows:
+        row["param"] = float(row["param"]) if row["param"] else None
+        ratio = row["information_ratio"]
+        row["information_ratio"] = float(ratio) if ratio else None
+    return [(row["strategy"], row["param"]) for row in choose_best(rows).values()]
+
+
+def compare(
+    choices=None,
+    sizes=SIZES,
+    regimes=REGIMES,
+    db_path=DEFAULT_DB_PATH,
+    workers=4,
+    results_dir=RESULTS_DIR,
+    horizon_days=HORIZON_DAYS,
+):
+    """Replay the chosen strategies by market regime and position size."""
+    results_dir = Path(results_dir)
+    if choices is None:
+        choices = load_choices(results_dir / "calibration_train.csv")
+    jobs = [
+        (regime, start, end, name, param, usd, db_path)
+        for regime, first, last in regimes
+        for start, end in windows((first, last), horizon_days)
+        for name, param in choices
+        for usd in sizes
+    ]
+    rows = run_jobs(jobs, workers)
+    order = {regime: i for i, (regime, _, _) in enumerate(regimes)}
+    summary = sorted(
+        aggregate(rows),
+        key=lambda row: (order[row["period"]], row["strategy"], row["usd"]),
+    )
+    save(rows, WINDOW_COLUMNS, results_dir / "comparison_windows.csv")
+    save(summary, SUMMARY_COLUMNS, results_dir / "comparison.csv")
+    return summary

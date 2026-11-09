@@ -1,19 +1,13 @@
 """Command line interface: python -m lpbacktest run ..."""
 
 import argparse
-import calendar
 import time
 
 from lpbacktest.engine import hourly_closes, simulate
+from lpbacktest.experiments import WARM_UP_SECONDS, to_timestamp
 from lpbacktest.metrics import summarize
 from lpbacktest.storage import connect, load_fee_changes, load_gas_prices, load_swaps
 from lpbacktest.strategies import build
-
-WARM_UP_SECONDS = 8 * 86_400  # a week of hourly prices for volatility, plus margin
-
-
-def to_timestamp(date):
-    return calendar.timegm(time.strptime(date, "%Y-%m-%d"))
 
 
 def run(args):
@@ -65,17 +59,18 @@ def run(args):
         )
 
 
-def print_rows(title, rows):
+def print_rows(title, rows, show_size=False):
     print(title)
     print(
-        f"{'Strategy':12}{'Param':>6}{'IR':>7}{'Mean':>8}{'Median':>8}"
+        f"{'Strategy':12}{'Param':>6}" + (f"{'Size':>7}" if show_size else "") + f"{'IR':>7}{'Mean':>8}{'Median':>8}"
         f"{'Beat':>6}{'Worst':>8}{'w/o thin':>9}{'Costs':>7}{'Moves':>7}"
     )
     for row in rows:
         ratio = "n/a" if row["information_ratio"] is None else f"{row['information_ratio']:.2f}"
         param = "" if row["param"] is None else f"{row['param']:g}"
+        size = f"{row['usd'] / 1000:>6.0f}k" if show_size else ""
         print(
-            f"{row['strategy']:12}{param:>6}{ratio:>7}{row['mean_vs_hodl']:>8.1%}"
+            f"{row['strategy']:12}{param:>6}{size}{ratio:>7}{row['mean_vs_hodl']:>8.1%}"
             f"{row['median_vs_hodl']:>8.1%}{row['share_beating_hodl']:>6.0%}"
             f"{row['worst_vs_hodl']:>8.1%}{row['mean_vs_hodl_without_thin']:>9.1%}"
             f"{row['mean_costs']:>7.1%}{row['mean_rebalances']:>7.1f}"
@@ -92,6 +87,19 @@ def calibrate_strategies(args):
     print()
     print_rows(f"Train, {TRAIN[0]} to {TRAIN[1]} (sorted by information ratio):", train_rows)
     print_rows(f"Test, {TEST[0]} to {TEST[1]} (best train parameter of each strategy):", test_rows)
+    print(f"Saved to results/. Time: {time.perf_counter() - started:.0f} s.")
+
+
+def compare_strategies(args):
+    from lpbacktest.experiments import HORIZON_DAYS, REGIMES, compare
+
+    started = time.perf_counter()
+    summary = compare(workers=args.workers)
+    print(f"Windows of {HORIZON_DAYS} days, opened monthly. Results vs HODL with the same tokens.")
+    print()
+    for regime, first, last in REGIMES:
+        rows = [row for row in summary if row["period"] == regime]
+        print_rows(f"{regime} ({first} to {last}):", rows, show_size=True)
     print(f"Saved to results/. Time: {time.perf_counter() - started:.0f} s.")
 
 
@@ -123,6 +131,10 @@ def main():
     calibrate_parser.add_argument("--usd", type=float, default=100_000)
     calibrate_parser.add_argument("--workers", type=int, default=4)
     calibrate_parser.set_defaults(handler=calibrate_strategies)
+
+    compare_parser = commands.add_parser("compare", help="chosen strategies by regime and size")
+    compare_parser.add_argument("--workers", type=int, default=4)
+    compare_parser.set_defaults(handler=compare_strategies)
 
     validate_parser = commands.add_parser("validate", help="compare fees with real positions")
     validate_parser.set_defaults(handler=validate_engine)

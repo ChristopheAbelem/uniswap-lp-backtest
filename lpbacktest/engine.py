@@ -15,6 +15,7 @@ TICK_SPACING = 10  # tick spacing of the 0.05% tier
 # shows a tiny L, while a real rebalance would be routed around that gap.
 LIQUIDITY_WINDOW = 500
 REBALANCE_CHECK_BLOCKS = 300  # the keeper looks at the position about once an hour
+GAS_SMOOTHING_SAMPLES = 3  # one block's price can be a spike; an LP waits it out
 THIN_LIQUIDITY_SHARE = 0.05  # above this share of a swap, the fee is reported apart
 # Median gasUsed of 430 real transactions in the tx_gas table.
 GAS_MINT = 418_892
@@ -86,10 +87,14 @@ def swap_fees(amount0, amount1, position_liquidity, active_liquidity, protocol_s
 
 
 def range_ticks(tick, width):
-    """Return usable ticks for a range of +/- width around a tick."""
+    """Return usable ticks for an ETH price range of +/- width around a tick.
+
+    The raw price is WETH per USDC, so a higher tick is a lower ETH price: the
+    lower tick holds the ETH price * (1 + width), the upper one * (1 - width).
+    """
     base = math.log(1.0001)
-    lower = tick + math.log(1 - width) / base
-    upper = tick + math.log(1 + width) / base
+    lower = tick - math.log(1 + width) / base
+    upper = tick - math.log(1 - width) / base
 
     tick_lower = math.floor(lower / TICK_SPACING) * TICK_SPACING
     tick_upper = math.ceil(upper / TICK_SPACING) * TICK_SPACING
@@ -97,9 +102,14 @@ def range_ticks(tick, width):
 
 
 def gas_cost_usd(block_number, usdc_per_eth, gas_blocks, gas_prices, gas_used=GAS_PER_REBALANCE):
-    """Return the USD cost of an operation at a block."""
+    """Return the USD cost of an operation at a block.
+
+    The gas price is the median of the last GAS_SMOOTHING_SAMPLES hourly samples,
+    so a spike in the one block sampled that hour is not paid.
+    """
     index = max(bisect.bisect_right(gas_blocks, block_number) - 1, 0)
-    return gas_used * gas_prices[index] / 10**18 * usdc_per_eth
+    recent = gas_prices[max(index - GAS_SMOOTHING_SAMPLES + 1, 0) : index + 1]
+    return gas_used * statistics.median(recent) / 10**18 * usdc_per_eth
 
 
 def price_impact_share(swap_usd, usdc_per_eth, sqrt_price, active_liquidity):
@@ -171,9 +181,11 @@ def simulate(swaps, usd, strategy, fee_changes=(), gas=None, closes=()):
     strategy.range(tick, closes) returns the ticks of a new range, and closes are the
     hourly prices known at that moment: the warm-up closes passed in, then one price
     per check. The position is checked about once an hour at the end of a block,
-    when (block, price, position value with fees, HODL value) is added to "path". If strategy.rebalances is true and the
-    position is out of range, it moves to a new range from strategy.range. Fees stay
-    outside the position and are not reinvested. Costs are paid from the position.
+    when (block, price, position value with fees, HODL value) is added to "path".
+    If strategy.rebalances is true and the position is out of range, it moves to a
+    new range from strategy.range, unless that would cost at least what the position
+    is worth: then the LP stops rebalancing and keeps its tokens ("stopped"). Fees
+    stay outside the position and are not reinvested. Costs are paid from the position.
     """
     swaps = iter(swaps)
     try:
@@ -199,8 +211,8 @@ def simulate(swaps, usd, strategy, fee_changes=(), gas=None, closes=()):
     hodl_liquidity = liquidity_for_usd(usd, sqrt_price, sqrt_lower, sqrt_upper)
     start0, start1 = position_amounts(hodl_liquidity, sqrt_price, sqrt_lower, sqrt_upper)
 
-    gas_usd = gas_cost_usd(first[5], entry_price, *gas, GAS_MINT) if gas else 0.0
-    invested = max(usd - gas_usd, 0.0)
+    gas_usd = min(gas_cost_usd(first[5], entry_price, *gas, GAS_MINT), usd) if gas else 0.0
+    invested = usd - gas_usd
     liquidity = liquidity_for_usd(invested, sqrt_price, sqrt_lower, sqrt_upper)
 
     fee0 = fee1 = thin_fee0 = thin_fee1 = 0.0
@@ -208,11 +220,12 @@ def simulate(swaps, usd, strategy, fee_changes=(), gas=None, closes=()):
     swap_fee_usd = impact_usd = 0.0
     protocol_share = 0.0
     pending_changes = list(fee_changes)
-    recent_liquidity = deque(maxlen=LIQUIDITY_WINDOW)
+    recent_liquidity = deque([int(first[3])], maxlen=LIQUIDITY_WINDOW)
     previous_block = first[5]
     previous_tick = first[4]
     next_check = first[5] + REBALANCE_CHECK_BLOCKS
     path = []
+    stopped = False
 
     for amount0, amount1, sqrt_price_x96, active_liquidity, tick, block_number in swaps:
         total_swaps += 1
@@ -232,23 +245,29 @@ def simulate(swaps, usd, strategy, fee_changes=(), gas=None, closes=()):
                 )
             )
 
-            if strategy.rebalances and not is_in_range(previous_tick, tick_lower, tick_upper):
-                tick_lower, tick_upper = strategy.range(previous_tick, closes)
-                sqrt_lower = tick_to_sqrt_price(tick_lower)
-                sqrt_upper = tick_to_sqrt_price(tick_upper)
-                target_liquidity = liquidity_for_usd(value, sqrt_price, sqrt_lower, sqrt_upper)
-                target = position_amounts(target_liquidity, sqrt_price, sqrt_lower, sqrt_upper)
+            out_of_range = not is_in_range(previous_tick, tick_lower, tick_upper)
+            if strategy.rebalances and out_of_range and not stopped:
+                new_lower, new_upper = strategy.range(previous_tick, closes)
+                new_sqrt_lower = tick_to_sqrt_price(new_lower)
+                new_sqrt_upper = tick_to_sqrt_price(new_upper)
+                target_liquidity = liquidity_for_usd(value, sqrt_price, new_sqrt_lower, new_sqrt_upper)
+                target = position_amounts(target_liquidity, sqrt_price, new_sqrt_lower, new_sqrt_upper)
 
                 typical_liquidity = statistics.median(recent_liquidity)
                 swap_fee, impact = rebalance_cost(old, target, price, sqrt_price, typical_liquidity)
                 gas_cost = gas_cost_usd(previous_block, price, *gas)
-                remaining = max(value - swap_fee - impact - gas_cost, 0.0)
-                liquidity = liquidity_for_usd(remaining, sqrt_price, sqrt_lower, sqrt_upper)
+                remaining = value - swap_fee - impact - gas_cost
 
-                rebalances += 1
-                gas_usd += gas_cost
-                swap_fee_usd += swap_fee
-                impact_usd += impact
+                if remaining <= 0:
+                    stopped = True
+                else:
+                    tick_lower, tick_upper = new_lower, new_upper
+                    sqrt_lower, sqrt_upper = new_sqrt_lower, new_sqrt_upper
+                    liquidity = liquidity_for_usd(remaining, sqrt_price, sqrt_lower, sqrt_upper)
+                    rebalances += 1
+                    gas_usd += gas_cost
+                    swap_fee_usd += swap_fee
+                    impact_usd += impact
 
         sqrt_price = int(sqrt_price_x96) / Q96
         recent_liquidity.append(int(active_liquidity))
@@ -275,9 +294,9 @@ def simulate(swaps, usd, strategy, fee_changes=(), gas=None, closes=()):
     fees_usd = amounts_to_usd(fee0, fee1, end_price)
     hodl_usd = amounts_to_usd(start0, start1, end_price)
     if gas:
-        exit_gas = gas_cost_usd(previous_block, end_price, *gas, GAS_BURN)
+        exit_gas = min(gas_cost_usd(previous_block, end_price, *gas, GAS_BURN), position_usd)
         gas_usd += exit_gas
-        position_usd = max(position_usd - exit_gas, 0.0)
+        position_usd -= exit_gas
     path.append((previous_block, end_price, position_usd + fees_usd, hodl_usd))
 
     return {
@@ -289,6 +308,7 @@ def simulate(swaps, usd, strategy, fee_changes=(), gas=None, closes=()):
         "swaps_in_range": swaps_in_range,
         "final_protocol_share": protocol_share,
         "rebalances": rebalances,
+        "stopped": stopped,
         "thin_liquidity_fees_usd": amounts_to_usd(thin_fee0, thin_fee1, end_price),
         "gas_usd": gas_usd,
         "swap_fee_usd": swap_fee_usd,
