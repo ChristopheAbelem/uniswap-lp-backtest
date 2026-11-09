@@ -118,13 +118,22 @@ def test_swap_fees_after_the_protocol_fee():
     assert fee1 == 0
 
 
-def test_range_ticks_use_the_tick_spacing_and_contain_the_width():
-    lower, upper = range_ticks(194996, 0.10)
+def test_range_ticks_are_plus_minus_width_in_eth_price():
+    tick = 194996
+    lower, upper = range_ticks(tick, 0.10)
 
     assert lower % 10 == 0 and upper % 10 == 0
-    assert lower <= 194996 + 0.9 and upper >= 194996
-    assert 1.0001 ** (194996 - lower) == pytest.approx(1 / 0.9, rel=1e-2)
-    assert 1.0001 ** (upper - 194996) == pytest.approx(1.1, rel=1e-2)
+    # The lower tick is the higher ETH price.
+    assert tick_to_usdc_per_eth(lower) == pytest.approx(tick_to_usdc_per_eth(tick) * 1.1, rel=1e-3)
+    assert tick_to_usdc_per_eth(upper) == pytest.approx(tick_to_usdc_per_eth(tick) * 0.9, rel=1e-3)
+
+
+def test_wide_range_is_symmetric_in_eth_price():
+    tick = 194996
+    lower, upper = range_ticks(tick, 0.5)
+
+    assert tick_to_usdc_per_eth(lower) == pytest.approx(tick_to_usdc_per_eth(tick) * 1.5, rel=1e-3)
+    assert tick_to_usdc_per_eth(upper) == pytest.approx(tick_to_usdc_per_eth(tick) * 0.5, rel=1e-3)
 
 
 BLOCKS = count(1)
@@ -196,7 +205,17 @@ def test_gas_cost_uses_the_last_known_price():
     # 10 gwei at $2,000.
     expected = GAS_PER_REBALANCE * 10e9 / 1e18 * 2000
     assert gas_cost_usd(399, 2000, blocks, prices) == pytest.approx(expected)
-    assert gas_cost_usd(400, 2000, blocks, prices) == pytest.approx(expected * 5)
+    # Two samples known at block 400: their median is 30 gwei.
+    assert gas_cost_usd(400, 2000, blocks, prices) == pytest.approx(expected * 3)
+
+
+def test_gas_cost_ignores_a_one_sample_spike():
+    blocks, prices = [100, 400, 700], [10 * 10**9, 1_000 * 10**9, 12 * 10**9]
+
+    expected = GAS_PER_REBALANCE * 12e9 / 1e18 * 2000
+    assert gas_cost_usd(700, 2000, blocks, prices) == pytest.approx(expected)
+    # A spike that lasts long enough is paid.
+    assert gas_cost_usd(700, 2000, blocks, [10 * 10**9, 1_000 * 10**9, 900 * 10**9]) == pytest.approx(expected * 75)
 
 
 def test_price_impact_matches_constant_liquidity_math():
@@ -278,6 +297,32 @@ def test_price_impact_ignores_a_liquidity_gap():
         return simulate_range(deep + [exit_swap, late], 100_000, 0.10, gas=gas, rebalance=True)
 
     assert run(10**16)["price_impact_usd"] == pytest.approx(run(10**21)["price_impact_usd"])
+
+
+def test_lp_stops_when_a_rebalance_costs_more_than_the_position():
+    gas = ([1], [3 * 10**11])  # 300 gwei, on a $1,000 position at about $3,390 per ETH
+    swaps = [
+        swap_at(195000, block=1),
+        swap_at(200000, block=2),
+        swap_at(200000, block=400),
+        swap_at(200000, block=800),
+    ]
+
+    result = simulate_range(swaps, 1_000, 0.10, gas=gas, rebalance=True)
+
+    # After the mint (about $430), about $570 is left, less than a rebalance (about $870).
+    assert result["stopped"] is True
+    assert result["rebalances"] == 0
+    assert result["gas_usd"] <= 1_000  # never more than the position could pay
+
+
+def test_costs_never_exceed_the_position():
+    gas = ([1], [10**18])  # absurd gas: even the mint costs more than the position
+
+    result = simulate_range([swap_at(195000, block=1), swap_at(195000, block=2)], 1_000, 0.10, gas=gas)
+
+    assert result["gas_usd"] == pytest.approx(1_000)
+    assert result["position_usd"] == pytest.approx(0, abs=1e-9)
 
 
 def test_rebalance_needs_gas_prices():
