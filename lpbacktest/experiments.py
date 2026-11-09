@@ -8,6 +8,7 @@ from depending on where one long period happens to begin and end.
 import calendar
 import csv
 import datetime
+import math
 import statistics
 import time
 from concurrent.futures import ProcessPoolExecutor
@@ -34,9 +35,9 @@ REGIMES = (
 SIZES = (10_000, 100_000, 1_000_000)
 CANDIDATES = (
     [("full_range", None)]
-    + [("fixed", width) for width in (0.01, 0.02, 0.05, 0.1, 0.2, 0.5)]
-    + [("rebalance", width) for width in (0.01, 0.02, 0.05, 0.1, 0.2, 0.5)]
-    + [("vol_scaled", k) for k in (0.5, 1, 2, 3, 4, 6)]
+    + [("fixed", width) for width in (0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 0.7, 0.9)]
+    + [("rebalance", width) for width in (0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 0.7, 0.9)]
+    + [("vol_scaled", k) for k in (0.5, 1, 2, 3, 4, 6, 8, 12)]
 )
 RESULTS_DIR = Path("results")
 WINDOW_COLUMNS = [
@@ -64,8 +65,9 @@ SUMMARY_COLUMNS = [
     "param",
     "usd",
     "windows",
-    "information_ratio",
     "mean_vs_hodl",
+    "t_stat",
+    "information_ratio",
     "median_vs_hodl",
     "share_beating_hodl",
     "worst_vs_hodl",
@@ -141,15 +143,37 @@ def run_jobs(jobs, workers):
         return list(pool.map(run_one, jobs))
 
 
-def aggregate(rows):
-    """Return one summary per strategy and parameter over its windows."""
+def newey_west_t(values, lags):
+    """Return the t-statistic of the mean, corrected for overlapping windows.
+
+    Windows of 90 days opened monthly share data with the next two, so their
+    results are correlated. Newey-West weights those autocovariances (Bartlett
+    kernel) instead of treating each window as independent.
+    """
+    n = len(values)
+    mean = statistics.mean(values)
+    deviations = [value - mean for value in values]
+    variance = sum(d * d for d in deviations) / n
+    for lag in range(1, min(lags, n - 1) + 1):
+        weight = 1 - lag / (lags + 1)
+        covariance = sum(deviations[i] * deviations[i - lag] for i in range(lag, n)) / n
+        variance += 2 * weight * covariance
+    if variance <= 0:
+        return None
+    return mean / math.sqrt(variance / n)
+
+
+def aggregate(rows, horizon_days=HORIZON_DAYS):
+    """Return one summary per strategy and parameter over its windows, best mean first."""
     grouped = {}
     for row in rows:
         key = (row["period"], row["strategy"], row["param"], row["usd"])
         grouped.setdefault(key, []).append(row)
 
+    lags = math.ceil(horizon_days / 30) - 1  # windows open monthly
     summaries = []
     for (period, strategy, param, usd), group in grouped.items():
+        group = sorted(group, key=lambda row: row["start"])
         excess = [row["net_vs_hodl_pct"] for row in group]
         spread = statistics.stdev(excess) if len(excess) > 1 else 0.0
         summaries.append(
@@ -159,8 +183,9 @@ def aggregate(rows):
                 "param": param,
                 "usd": usd,
                 "windows": len(group),
-                "information_ratio": statistics.mean(excess) / spread if spread > 0 else None,
                 "mean_vs_hodl": statistics.mean(excess),
+                "t_stat": newey_west_t(excess, lags) if len(excess) > 1 else None,
+                "information_ratio": statistics.mean(excess) / spread if spread > 0 else None,
                 "median_vs_hodl": statistics.median(excess),
                 "share_beating_hodl": sum(value > 0 for value in excess) / len(excess),
                 "worst_vs_hodl": min(excess),
@@ -173,20 +198,19 @@ def aggregate(rows):
                 "mean_rebalances": statistics.mean(row["rebalances"] for row in group),
             }
         )
-    return sorted(summaries, key=ratio_key, reverse=True)
-
-
-def ratio_key(summary):
-    ratio = summary["information_ratio"]
-    return ratio if ratio is not None else float("-inf")
+    return sorted(summaries, key=lambda summary: summary["mean_vs_hodl"], reverse=True)
 
 
 def choose_best(summaries):
-    """Return the summary with the highest information ratio for each strategy."""
+    """Return the summary with the highest mean result vs HODL for each strategy.
+
+    The information ratio is not used: with a negative mean, a larger spread moves
+    it toward zero, so it would reward inconsistency.
+    """
     best = {}
     for summary in summaries:
         current = best.get(summary["strategy"])
-        if current is None or ratio_key(summary) > ratio_key(current):
+        if current is None or summary["mean_vs_hodl"] > current["mean_vs_hodl"]:
             best[summary["strategy"]] = summary
     return best
 
@@ -211,8 +235,7 @@ def calibrate(
 ):
     """Choose each strategy's parameter on train windows, then replay it on test windows.
 
-    The parameter with the highest information ratio wins: mean excess return over
-    HODL divided by its standard deviation across windows.
+    The parameter with the highest mean result vs HODL across windows wins.
     """
     results_dir = Path(results_dir)
     jobs = [
@@ -221,7 +244,7 @@ def calibrate(
         for name, param in candidates
     ]
     train_windows = run_jobs(jobs, workers)
-    train_summary = aggregate(train_windows)
+    train_summary = aggregate(train_windows, horizon_days)
     save(train_windows, WINDOW_COLUMNS, results_dir / "calibration_train_windows.csv")
     save(train_summary, SUMMARY_COLUMNS, results_dir / "calibration_train.csv")
 
@@ -232,7 +255,7 @@ def calibrate(
         for summary in best.values()
     ]
     test_windows = run_jobs(jobs, workers)
-    test_summary = aggregate(test_windows)
+    test_summary = aggregate(test_windows, horizon_days)
     save(test_windows, WINDOW_COLUMNS, results_dir / "calibration_test_windows.csv")
     save(test_summary, SUMMARY_COLUMNS, results_dir / "calibration_test.csv")
     return train_summary, test_summary
@@ -244,8 +267,7 @@ def load_choices(path):
         rows = list(csv.DictReader(file))
     for row in rows:
         row["param"] = float(row["param"]) if row["param"] else None
-        ratio = row["information_ratio"]
-        row["information_ratio"] = float(ratio) if ratio else None
+        row["mean_vs_hodl"] = float(row["mean_vs_hodl"])
     return [(row["strategy"], row["param"]) for row in choose_best(rows).values()]
 
 
@@ -272,7 +294,7 @@ def compare(
     rows = run_jobs(jobs, workers)
     order = {regime: i for i, (regime, _, _) in enumerate(regimes)}
     summary = sorted(
-        aggregate(rows),
+        aggregate(rows, horizon_days),
         key=lambda row: (order[row["period"]], row["strategy"], row["usd"]),
     )
     save(rows, WINDOW_COLUMNS, results_dir / "comparison_windows.csv")
