@@ -368,7 +368,7 @@ h2 {{ break-after: avoid; }}
 p {{ margin: 4px 0 6px; }}
 </style></head><body>
 
-<h1>Uniswap v3 Liquidity Provision: No Simple Range Rule Beat Holding</h1>
+<h1>Uniswap v3 Liquidity Provision: Which Range Strategy Earns the Most Against Holding?</h1>
 <div class='sub'>An event-level backtest of {SWAPS / 1e6:.2f} million swaps in the USDC/WETH 0.05% pool, July 2021 to October 2026</div>
 <div class='author'>Christophe Abelem, Computer Engineering, CESUPA (Belém, Brazil) | Code and data: github.com/ChristopheAbelem/uniswap-lp-backtest</div>
 
