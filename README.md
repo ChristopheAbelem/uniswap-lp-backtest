@@ -2,7 +2,7 @@
 
 Which range strategy would have earned the most as a liquidity provider (LP) in the Uniswap v3 USDC/WETH 0.05% pool on Ethereum, compared with simply holding the same tokens (HODL), after gas and trading costs?
 
-**Result:** none beat holding. Out of sample (January 2024 to October 2026), the best rule, a full range, averaged -0.55% vs HODL per 90-day window and was statistically indistinguishable from holding. Narrow ranges that rebalance when the price leaves them lost the most, and the rule that led in training (a volatility-scaled range) was the only one clearly below holding out of sample (-3.22%, t = -2.96).
+**Result:** none beat holding. Parameters were chosen on July 2021 to December 2023 and tested on January 2024 to October 2026. Out of sample, the best rule, a full range, averaged -0.55% vs HODL per 90-day window and was statistically indistinguishable from holding. Narrow ranges that rebalance when the price leaves them lost the most, and the rule that led in training (a volatility-scaled range) was the only one clearly below holding out of sample (-3.22%, t = -2.96).
 
 **Research note (5 pages):** [report/lp_strategy_note.pdf](report/lp_strategy_note.pdf)
 
