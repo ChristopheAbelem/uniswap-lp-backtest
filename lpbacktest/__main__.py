@@ -62,15 +62,16 @@ def run(args):
 def print_rows(title, rows, show_size=False):
     print(title)
     print(
-        f"{'Strategy':12}{'Param':>6}" + (f"{'Size':>7}" if show_size else "") + f"{'IR':>7}{'Mean':>8}{'Median':>8}"
-        f"{'Beat':>6}{'Worst':>8}{'w/o thin':>9}{'Costs':>7}{'Moves':>7}"
+        f"{'Strategy':12}{'Param':>6}" + (f"{'Size':>7}" if show_size else "")
+        + f"{'Mean':>8}{'t':>7}{'Median':>8}{'Beat':>6}{'Worst':>8}"
+        + f"{'w/o thin':>9}{'Costs':>7}{'Moves':>7}"
     )
     for row in rows:
-        ratio = "n/a" if row["information_ratio"] is None else f"{row['information_ratio']:.2f}"
+        t_stat = "n/a" if row["t_stat"] is None else f"{row['t_stat']:.2f}"
         param = "" if row["param"] is None else f"{row['param']:g}"
         size = f"{row['usd'] / 1000:>6.0f}k" if show_size else ""
         print(
-            f"{row['strategy']:12}{param:>6}{size}{ratio:>7}{row['mean_vs_hodl']:>8.1%}"
+            f"{row['strategy']:12}{param:>6}{size}{row['mean_vs_hodl']:>8.1%}{t_stat:>7}"
             f"{row['median_vs_hodl']:>8.1%}{row['share_beating_hodl']:>6.0%}"
             f"{row['worst_vs_hodl']:>8.1%}{row['mean_vs_hodl_without_thin']:>9.1%}"
             f"{row['mean_costs']:>7.1%}{row['mean_rebalances']:>7.1f}"
@@ -84,8 +85,9 @@ def calibrate_strategies(args):
     started = time.perf_counter()
     train_rows, test_rows = calibrate(usd=args.usd, workers=args.workers)
     print(f"Windows of {HORIZON_DAYS} days, opened monthly. Results vs HODL with the same tokens.")
+    print("t: Newey-West t-statistic of the mean (|t| < 2: not distinguishable from zero).")
     print()
-    print_rows(f"Train, {TRAIN[0]} to {TRAIN[1]} (sorted by information ratio):", train_rows)
+    print_rows(f"Train, {TRAIN[0]} to {TRAIN[1]} (sorted by mean vs HODL):", train_rows)
     print_rows(f"Test, {TEST[0]} to {TEST[1]} (best train parameter of each strategy):", test_rows)
     print(f"Saved to results/. Time: {time.perf_counter() - started:.0f} s.")
 
@@ -96,6 +98,7 @@ def compare_strategies(args):
     started = time.perf_counter()
     summary = compare(workers=args.workers)
     print(f"Windows of {HORIZON_DAYS} days, opened monthly. Results vs HODL with the same tokens.")
+    print("t: Newey-West t-statistic of the mean (|t| < 2: not distinguishable from zero).")
     print()
     for regime, first, last in REGIMES:
         rows = [row for row in summary if row["period"] == regime]

@@ -1,5 +1,6 @@
 import calendar
 import csv
+import statistics
 import time
 
 import pytest
@@ -74,7 +75,7 @@ def test_calibrate_chooses_on_train_and_replays_on_test(tmp_path):
 
     assert len(train) == 3 and all(row["windows"] == 2 for row in train)
     assert {row["strategy"] for row in test} == {"fixed", "vol_scaled"}
-    best_fixed = max((r for r in train if r["strategy"] == "fixed"), key=experiments.ratio_key)
+    best_fixed = max((r for r in train if r["strategy"] == "fixed"), key=lambda r: r["mean_vs_hodl"])
     assert next(r for r in test if r["strategy"] == "fixed")["param"] == best_fixed["param"]
     with open(tmp_path / "calibration_test_windows.csv") as file:
         assert len(list(csv.DictReader(file))) == 4  # 2 windows x 2 strategies
@@ -83,6 +84,7 @@ def test_calibrate_chooses_on_train_and_replays_on_test(tmp_path):
 def window(strategy, param, excess, costs=0.01):
     return {
         "period": "train",
+        "start": "2021-01-01",  # same start: the sort keeps the order given
         "strategy": strategy,
         "param": param,
         "usd": 100_000,
@@ -107,18 +109,39 @@ def test_aggregate_measures_consistency_over_windows():
     assert summary["worst_vs_hodl"] == -0.01
 
 
-def test_choose_best_prefers_steady_excess_over_a_lucky_one():
-    rows = [window("fixed", 0.1, value) for value in (0.30, -0.20, 0.25, -0.15)]
-    rows += [window("fixed", 0.5, value) for value in (0.02, 0.03, 0.02, 0.03)]
+def test_choose_best_uses_the_mean_not_the_information_ratio():
+    # Both lose on average. The noisy one has an information ratio closer to zero,
+    # but a worse mean: the mean decides.
+    rows = [window("fixed", 0.1, value) for value in (0.30, -0.40, 0.25, -0.35)]
+    rows += [window("fixed", 0.5, value) for value in (-0.02, -0.01, -0.02, -0.01)]
 
-    best = experiments.choose_best(experiments.aggregate(rows))
+    summaries = experiments.aggregate(rows)
+    best = experiments.choose_best(summaries)
 
+    noisy = next(s for s in summaries if s["param"] == 0.1)
+    steady = next(s for s in summaries if s["param"] == 0.5)
+    assert noisy["information_ratio"] > steady["information_ratio"]
     assert best["fixed"]["param"] == 0.5
+
+
+def test_newey_west_without_lags_is_the_plain_t_statistic():
+    values = [0.02, -0.01, 0.05, 0.00, 0.03]
+    mean = statistics.mean(values)
+    population_sd = statistics.pstdev(values)
+
+    assert experiments.newey_west_t(values, 0) == pytest.approx(mean / (population_sd / len(values) ** 0.5))
+
+
+def test_newey_west_shrinks_t_for_overlapping_windows():
+    # Positively autocorrelated results, as overlapping windows produce.
+    values = [0.01, 0.012, 0.011, 0.03, 0.031, 0.029, -0.01, -0.012, 0.02, 0.021]
+
+    assert abs(experiments.newey_west_t(values, 2)) < abs(experiments.newey_west_t(values, 0))
 
 
 def test_load_choices_reads_the_best_parameters(tmp_path):
     rows = [window("fixed", 0.1, value) for value in (0.30, -0.20, 0.25, -0.15)]
-    rows += [window("fixed", 0.5, value) for value in (0.02, 0.03, 0.02, 0.03)]
+    rows += [window("fixed", 0.5, value) for value in (0.12, 0.13, 0.12, 0.13)]
     rows += [window("full_range", None, value) for value in (0.01, 0.02)]
     path = tmp_path / "calibration_train.csv"
     experiments.save(experiments.aggregate(rows), experiments.SUMMARY_COLUMNS, path)
